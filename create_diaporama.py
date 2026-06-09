@@ -2,769 +2,835 @@ from pptx import Presentation
 from pptx.util import Inches, Pt, Emu
 from pptx.dml.color import RGBColor
 from pptx.enum.text import PP_ALIGN
-from pptx.util import Inches, Pt
-import copy
+from pptx.oxml.ns import qn
+from lxml import etree
+import copy, math
 
 # ── Palette ──────────────────────────────────────────────────────────────────
-DARK_BLUE   = RGBColor(0x0A, 0x29, 0x4B)   # fond titre
-MID_BLUE    = RGBColor(0x1A, 0x52, 0x76)   # accent
-LIGHT_BLUE  = RGBColor(0xD0, 0xE8, 0xF5)   # fond contenu
-WHITE       = RGBColor(0xFF, 0xFF, 0xFF)
-ORANGE      = RGBColor(0xFF, 0x7A, 0x00)   # chiffres clés
-GRAY_LIGHT  = RGBColor(0xF0, 0xF4, 0xF8)
-TEXT_DARK   = RGBColor(0x1A, 0x1A, 0x2E)
+INK       = RGBColor(0x0D, 0x1B, 0x3E)   # bleu marine profond
+COBALT    = RGBColor(0x1A, 0x4F, 0x8A)   # bleu cobalt
+SKY       = RGBColor(0x4A, 0x90, 0xD9)   # bleu ciel
+MINT      = RGBColor(0x00, 0xC9, 0xA7)   # vert menthe
+CORAL     = RGBColor(0xFF, 0x6B, 0x6B)   # rouge corail
+GOLD      = RGBColor(0xFF, 0xC2, 0x00)   # jaune or
+WHITE     = RGBColor(0xFF, 0xFF, 0xFF)
+OFF_WHITE = RGBColor(0xF5, 0xF7, 0xFF)
+LIGHT_BG  = RGBColor(0xEA, 0xF2, 0xFB)
+SLATE     = RGBColor(0x4A, 0x5A, 0x7A)
+PALE_MINT = RGBColor(0xD4, 0xF5, 0xEF)
+PALE_CORAL= RGBColor(0xFF, 0xE5, 0xE5)
+
+def hex2rgb(h): return RGBColor(int(h[0:2],16),int(h[2:4],16),int(h[4:6],16))
 
 prs = Presentation()
 prs.slide_width  = Inches(13.33)
 prs.slide_height = Inches(7.5)
+BLANK = prs.slide_layouts[6]
 
-BLANK = prs.slide_layouts[6]   # completement vide
-
-def add_rect(slide, x, y, w, h, fill_color, alpha=None):
-    shape = slide.shapes.add_shape(1, Inches(x), Inches(y), Inches(w), Inches(h))
-    shape.line.fill.background()
-    if fill_color:
-        shape.fill.solid()
-        shape.fill.fore_color.rgb = fill_color
+# ── Primitives ────────────────────────────────────────────────────────────────
+def rect(sl, x,y,w,h, fill, radius=0):
+    sp = sl.shapes.add_shape(1, Inches(x),Inches(y),Inches(w),Inches(h))
+    sp.line.fill.background()
+    if fill:
+        sp.fill.solid(); sp.fill.fore_color.rgb = fill
     else:
-        shape.fill.background()
-    return shape
+        sp.fill.background()
+    return sp
 
-def add_textbox(slide, text, x, y, w, h,
-                font_size=18, bold=False, color=TEXT_DARK,
-                align=PP_ALIGN.LEFT, italic=False, wrap=True):
-    tb = slide.shapes.add_textbox(Inches(x), Inches(y), Inches(w), Inches(h))
-    tb.word_wrap = wrap
-    tf = tb.text_frame
-    tf.word_wrap = wrap
-    p = tf.paragraphs[0]
-    p.alignment = align
+def tb(sl, text, x,y,w,h, size=16, bold=False, color=INK,
+       align=PP_ALIGN.LEFT, italic=False, wrap=True, spacing=1.0):
+    box = sl.shapes.add_textbox(Inches(x),Inches(y),Inches(w),Inches(h))
+    box.word_wrap = wrap
+    tf = box.text_frame; tf.word_wrap = wrap
+    p = tf.paragraphs[0]; p.alignment = align
     run = p.add_run()
     run.text = text
-    run.font.size = Pt(font_size)
-    run.font.bold = bold
-    run.font.italic = italic
-    run.font.color.rgb = color
-    return tb
+    run.font.size = Pt(size); run.font.bold = bold
+    run.font.italic = italic; run.font.color.rgb = color
+    return box
 
-def slide_header(slide, title, subtitle=None, section_label=None):
-    """Bande bleue en haut avec titre."""
-    add_rect(slide, 0, 0, 13.33, 1.4, DARK_BLUE)
-    add_textbox(slide, title, 0.4, 0.08, 11, 0.9,
-                font_size=32, bold=True, color=WHITE, align=PP_ALIGN.LEFT)
-    if subtitle:
-        add_textbox(slide, subtitle, 0.4, 0.85, 11, 0.45,
-                    font_size=16, color=RGBColor(0xB0, 0xD0, 0xE8), align=PP_ALIGN.LEFT)
-    if section_label:
-        add_textbox(slide, section_label, 10.8, 0.1, 2.3, 0.5,
-                    font_size=12, color=ORANGE, bold=True, align=PP_ALIGN.RIGHT)
-    # fond gris clair pour le corps
-    add_rect(slide, 0, 1.4, 13.33, 6.1, GRAY_LIGHT)
+def mtb(sl, lines, x,y,w,h, size=15, color=INK, bold_first=False, spacing=Pt(4),
+        align=PP_ALIGN.LEFT, line_bold=False):
+    """Multi-line textbox. lines = list of str."""
+    box = sl.shapes.add_textbox(Inches(x),Inches(y),Inches(w),Inches(h))
+    box.word_wrap = True
+    tf = box.text_frame; tf.word_wrap = True
+    for i,line in enumerate(lines):
+        p = tf.paragraphs[0] if i==0 else tf.add_paragraph()
+        p.alignment = align; p.space_after = spacing
+        r = p.add_run(); r.text = line
+        r.font.size = Pt(size)
+        r.font.color.rgb = color
+        r.font.bold = (bold_first and i==0) or line_bold
+    return box
 
-def add_bullet_box(slide, bullets, x, y, w, h,
-                   title=None, title_color=DARK_BLUE, bg=WHITE,
-                   font_size=16, title_size=18):
-    add_rect(slide, x, y, w, h, bg)
-    offset = y + 0.12
+def gradient_bg(sl, c1, c2):
+    """Fake gradient: two rects side by side."""
+    rect(sl,0,0,6.67,7.5,c1)
+    rect(sl,6.67,0,6.66,7.5,c2)
+
+# ── Card helper ───────────────────────────────────────────────────────────────
+def card(sl, x,y,w,h, bg, title=None, title_color=WHITE,
+         title_bg=None, icon=None, lines=None, line_size=14,
+         line_color=None, title_size=16):
+    rect(sl,x,y,w,h,bg)
+    lc = line_color or title_color
+    cy = y+0.12
+    if title_bg:
+        rect(sl,x,y,w,0.48,title_bg)
+    if icon:
+        tb(sl,icon,x+0.1,cy,0.55,0.45,size=22,align=PP_ALIGN.CENTER,color=title_color)
+        ix=x+0.6
+    else:
+        ix=x+0.18
     if title:
-        add_textbox(slide, title, x+0.15, offset, w-0.3, 0.4,
-                    font_size=title_size, bold=True, color=title_color)
-        offset += 0.42
-    tb = slide.shapes.add_textbox(Inches(x+0.15), Inches(offset),
-                                   Inches(w-0.3), Inches(h-(offset-y)-0.15))
-    tb.word_wrap = True
-    tf = tb.text_frame
-    tf.word_wrap = True
-    first = True
-    for b in bullets:
-        if first:
-            p = tf.paragraphs[0]
-            first = False
-        else:
-            p = tf.add_paragraph()
-        p.space_after = Pt(3)
-        run = p.add_run()
-        run.text = b
-        run.font.size = Pt(font_size)
-        run.font.color.rgb = TEXT_DARK
+        tb(sl,title,ix,cy,w-(ix-x)-0.1,0.42,size=title_size,bold=True,
+           color=title_color,align=PP_ALIGN.LEFT)
+        cy+=0.5
+    if lines:
+        mtb(sl,lines,x+0.18,cy,w-0.3,h-(cy-y)-0.1,size=line_size,color=lc)
 
-def add_kpi(slide, value, label, x, y, w=2.6, h=1.2):
-    add_rect(slide, x, y, w, h, DARK_BLUE)
-    add_textbox(slide, value, x, y+0.05, w, 0.65,
-                font_size=30, bold=True, color=ORANGE, align=PP_ALIGN.CENTER)
-    add_textbox(slide, label, x, y+0.65, w, 0.5,
-                font_size=13, color=WHITE, align=PP_ALIGN.CENTER)
+def kpi_card(sl, value, label, x,y,w=3.0,h=1.5, bg=INK, val_color=GOLD, lbl_color=WHITE):
+    rect(sl,x,y,w,h,bg)
+    tb(sl,value,x,y+0.12,w,0.75,size=36,bold=True,color=val_color,align=PP_ALIGN.CENTER)
+    tb(sl,label,x+0.1,y+0.82,w-0.2,0.6,size=13,color=lbl_color,align=PP_ALIGN.CENTER)
 
-# ─────────────────────────────────────────────────────────────────────────────
-# DIAPO 1 — Couverture
-# ─────────────────────────────────────────────────────────────────────────────
-sl = prs.slides.add_slide(BLANK)
-add_rect(sl, 0, 0, 13.33, 7.5, DARK_BLUE)
-add_rect(sl, 0, 5.2, 13.33, 2.3, MID_BLUE)
-# Logo fictif / titre produit
-add_textbox(sl, "STYLO ORTHO", 1, 1.2, 11.33, 1.5,
-            font_size=60, bold=True, color=WHITE, align=PP_ALIGN.CENTER)
-add_textbox(sl, "Stylo correcteur d'orthographe", 1, 2.7, 11.33, 0.8,
-            font_size=28, color=LIGHT_BLUE, align=PP_ALIGN.CENTER)
-add_textbox(sl, "Assemblé en France  •  Marché de la papeterie intelligente", 1, 3.4, 11.33, 0.6,
-            font_size=18, color=RGBColor(0xB0, 0xD0, 0xE8), align=PP_ALIGN.CENTER)
-add_rect(sl, 4.5, 4.1, 4.33, 0.06, ORANGE)
-add_textbox(sl, "ANALYSE DU MARCHÉ", 1, 5.4, 11.33, 0.7,
-            font_size=22, bold=True, color=WHITE, align=PP_ALIGN.CENTER)
-add_textbox(sl, "Mathéo Guzzi  •  Pierre Lachat  •  Valentin Imbault-Casset", 1, 6.1, 11.33, 0.5,
-            font_size=14, color=LIGHT_BLUE, align=PP_ALIGN.CENTER)
+def divider(sl, y, color=GOLD, x=0.5, w=12.33, h=0.05):
+    rect(sl,x,y,w,h,color)
+
+def section_tag(sl, label, color=COBALT):
+    rect(sl,10.5,0.12,2.7,0.42,color)
+    tb(sl,label,10.5,0.12,2.7,0.42,size=12,bold=True,color=WHITE,align=PP_ALIGN.CENTER)
+
+def slide_title(sl, title, subtitle=None, y=0.22):
+    tb(sl,title,0.5,y,9.8,0.75,size=30,bold=True,color=WHITE,align=PP_ALIGN.LEFT)
+    if subtitle:
+        tb(sl,subtitle,0.5,y+0.72,9.8,0.45,size=16,color=SKY,italic=True)
+
+def dark_header(sl, title, subtitle=None, tag=None):
+    rect(sl,0,0,13.33,1.55,INK)
+    rect(sl,0,1.55,13.33,5.95,OFF_WHITE)
+    rect(sl,0,1.55,0.08,5.95,COBALT)
+    if tag: section_tag(sl,tag)
+    slide_title(sl,title,subtitle)
 
 # ─────────────────────────────────────────────────────────────────────────────
-# DIAPO 2 — Introduction
+# DIAPO 1 — COUVERTURE
 # ─────────────────────────────────────────────────────────────────────────────
 sl = prs.slides.add_slide(BLANK)
-slide_header(sl, "1. Introduction", section_label="INTRODUCTION")
+rect(sl,0,0,13.33,7.5,INK)
+# Bande diagonale décorative
+rect(sl,0,4.5,13.33,0.08,GOLD)
+rect(sl,0,4.58,13.33,2.92,COBALT)
+# Cercles décoratifs (simulés avec des carrés colorés semi-transparents)
+rect(sl,9.5,-0.5,4.5,4.5,RGBColor(0x1E,0x3A,0x6E))
+rect(sl,10.2,0.2,3.0,3.0,RGBColor(0x26,0x4F,0x90))
 
-add_textbox(sl,
-    "Le stylo correcteur d'orthographe Stylo Ortho apporte une solution innovante "
-    "au besoin quotidien de corriger ses fautes d'orthographe — en temps réel, sur papier, "
-    "sans connexion internet.",
-    0.5, 1.6, 12.33, 1.0, font_size=19, color=TEXT_DARK)
+tb(sl,"STYLO ORTHO",0.7,0.9,12,1.5,size=72,bold=True,color=WHITE,align=PP_ALIGN.LEFT)
+rect(sl,0.7,2.35,4.5,0.08,GOLD)
+tb(sl,"Stylo correcteur d'orthographe",0.7,2.5,10,0.65,
+   size=26,color=SKY,align=PP_ALIGN.LEFT)
+tb(sl,"Assemblé en France  ·  Papeterie intelligente",
+   0.7,3.15,10,0.5,size=18,color=RGBColor(0x80,0xA8,0xD8),italic=True)
 
-# 4 KPI
-add_kpi(sl, "214", "répondants à l'enquête", 0.5, 2.8)
-add_kpi(sl, "82,3 %", "Oui + Peut-être", 3.3, 2.8)
-add_kpi(sl, "86,4 %", "jugent le produit utile", 6.1, 2.8)
-add_kpi(sl, "99,90 €", "prix de vente public", 8.9, 2.8)
+# 3 KPIs en bas
+for val,lbl,x in [("214","répondants",0.6),("82,3%","intéressés",4.8),("99,90 €","prix public",9.0)]:
+    tb(sl,val,x,4.85,3.5,0.9,size=38,bold=True,color=GOLD,align=PP_ALIGN.CENTER)
+    tb(sl,lbl,x,5.65,3.5,0.45,size=16,color=WHITE,align=PP_ALIGN.CENTER)
 
-add_bullet_box(sl,
-    ["Marché de la papeterie en France : 4,6 milliards d'euros en 2025",
-     "107 millions d'articles vendus à la rentrée scolaire 2024",
-     "Segment des stylos intelligents quasi inexistant en France → opportunité pionnière",
-     "Produit assemblé en France (Nicomatic) — conformité normes européennes"],
-    0.5, 4.3, 12.33, 2.9, title="Contexte marché", bg=WHITE, font_size=17)
+tb(sl,"Analyse du Marché",0.7,6.3,8,0.5,size=16,color=RGBColor(0x80,0xA8,0xD8),bold=True)
+tb(sl,"Mathéo Guzzi  ·  Pierre Lachat  ·  Valentin Imbault-Casset",
+   0.7,6.8,11,0.4,size=13,color=RGBColor(0x60,0x88,0xB8))
 
 # ─────────────────────────────────────────────────────────────────────────────
-# DIAPO 3 — Demande : Analyse quantitative
+# DIAPO 2 — INTRODUCTION
 # ─────────────────────────────────────────────────────────────────────────────
 sl = prs.slides.add_slide(BLANK)
-slide_header(sl, "2.1 Analyse quantitative de la demande", section_label="DEMANDE")
+dark_header(sl,"1. Introduction",tag="INTRODUCTION")
 
-add_textbox(sl,
-    "Chiffres généraux sur le marché : poids en volume et en valeur, taux de croissance, tendance et quantités moyennes consommées.",
-    0.5, 1.5, 12.33, 0.55, font_size=16, italic=True, color=MID_BLUE)
+# Grand texte accroche
+rect(sl,0.5,1.7,12.33,1.3,COBALT)
+tb(sl,"Le premier stylo qui corrige l'orthographe\nen temps réel — sur papier, sans internet.",
+   0.8,1.82,11.5,1.1,size=22,bold=True,color=WHITE,align=PP_ALIGN.CENTER)
 
-# Tableau chiffres marché
-headers = ["Indicateur", "En valeur / Volume"]
-rows = [
-    ("Marché papeterie France (2025)", "4,6 milliards d'euros — +52,1 % de CA en août vs décembre (forte saisonnalité rentrée)"),
-    ("Papeterie hors papier bureautique (2024)", "1,3 milliard d'euros — 107 millions d'articles vendus à la rentrée scolaire 2024"),
-    ("Marché mondial (2024)", "147,5 milliards de dollars — TCAC +3,8 % jusqu'en 2034"),
-    ("Fournitures scolaires mondiales", "40 % de la demande mondiale"),
+# 4 KPI cards
+kpi_card(sl,"214","répondants à l'enquête",0.5,3.25,2.9,1.6)
+kpi_card(sl,"82,3 %","Oui + Peut-être",3.55,3.25,2.9,1.6)
+kpi_card(sl,"86,4 %","jugent le produit utile",6.6,3.25,2.9,1.6)
+kpi_card(sl,"99,90 €","prix de vente public",9.65,3.25,2.9,1.6)
+
+# Ligne contexte
+rect(sl,0.5,5.1,12.33,1.2,PALE_MINT)
+mtb(sl,[
+    "📍  Marché papeterie France : 4,6 Mds€ en 2025  ·  107 millions d'articles vendus à la rentrée 2024",
+    "🚀  Segment stylos intelligents quasi inexistant en France → opportunité de positionnement pionnier"
+],0.7,5.18,12,1.05,size=15,color=INK,bold_first=False)
+
+# ─────────────────────────────────────────────────────────────────────────────
+# DIAPO 3 — DEMANDE QUANTITATIVE
+# ─────────────────────────────────────────────────────────────────────────────
+sl = prs.slides.add_slide(BLANK)
+dark_header(sl,"2.1 Analyse quantitative de la demande",
+            subtitle="Poids en volume et en valeur · Taux de croissance · Tendances",tag="DEMANDE")
+
+# 4 grandes stats visuelles en cartes
+stats = [
+    ("4,6 Mds €","Marché papeterie\nFrance 2025",COBALT),
+    ("147,5 Mds $","Marché mondial 2024\n+3,8 % / an jusqu'en 2034",INK),
+    ("107 M","Articles vendus\nrentrée scolaire 2024",RGBColor(0x0E,0x6B,0x5E)),
+    ("45 %","des répondants font\ndes fautes souvent",RGBColor(0xC0,0x3A,0x2B)),
 ]
-y = 2.15
-add_rect(sl, 0.5, y, 12.33, 0.4, DARK_BLUE)
-add_textbox(sl, "Indicateur", 0.55, y+0.04, 5.5, 0.35, font_size=14, bold=True, color=WHITE)
-add_textbox(sl, "En valeur / Volume", 6.1, y+0.04, 6.5, 0.35, font_size=14, bold=True, color=WHITE)
-colors = [WHITE, GRAY_LIGHT]
-for i, (ind, val) in enumerate(rows):
-    y += 0.52
-    add_rect(sl, 0.5, y, 12.33, 0.5, colors[i%2])
-    add_textbox(sl, ind, 0.55, y+0.04, 5.5, 0.45, font_size=13, bold=True, color=DARK_BLUE)
-    add_textbox(sl, val, 6.1, y+0.04, 6.5, 0.45, font_size=13, color=TEXT_DARK)
+for i,(val,lbl,bg) in enumerate(stats):
+    x = 0.4 + i*3.2
+    kpi_card(sl,val,lbl,x,1.75,3.0,1.9,bg=bg)
 
-# Chiffre clé + tri à plat
-y += 0.65
-add_rect(sl, 0.5, y, 12.33, 1.15, MID_BLUE)
-add_textbox(sl, "📊 Tri à plat — Fréquence des fautes d'orthographe (enquête n=214)",
-            0.7, y+0.05, 12, 0.4, font_size=15, bold=True, color=WHITE)
-add_textbox(sl,
-    "45 % des répondants font des fautes souvent ou très souvent. "
-    "C'est la cible directe et fonctionnelle du Stylo Ortho. "
-    "Ce chiffre valide le besoin concret et quotidien du produit sur le marché.",
-    0.7, y+0.45, 12, 0.6, font_size=14, color=LIGHT_BLUE)
+# Insight encadré
+rect(sl,0.4,3.95,12.53,1.25,LIGHT_BG)
+rect(sl,0.4,3.95,0.12,1.25,GOLD)
+tb(sl,"📊 Tri à plat — Fréquence des fautes (n=214)",
+   0.65,4.05,12,0.42,size=16,bold=True,color=INK)
+tb(sl,"45 % des répondants font des fautes souvent ou très souvent. "
+   "Ce chiffre valide le besoin concret et quotidien du produit sur le marché. "
+   "C'est la cible directe et fonctionnelle du Stylo Ortho.",
+   0.65,4.5,12,0.62,size=15,color=SLATE)
+
+# Barre visuelle proportion
+rect(sl,0.4,5.4,12.53,0.9,WHITE)
+tb(sl,"Fréquence des fautes d'orthographe (enquête n=214)",
+   0.6,5.44,12,0.38,size=14,bold=True,color=INK)
+# Barres proportionnelles
+bar_data = [("Très souvent","22%",0.22,CORAL),("Souvent","23%",0.23,RGBColor(0xFF,0x9F,0x6B)),
+            ("Parfois","35%",0.35,SKY),("Rarement","20%",0.20,LIGHT_BG)]
+bx = 0.6; bw_total = 12.1; by = 5.88
+for lbl,pct,ratio,col in bar_data:
+    bw = bw_total * ratio
+    rect(sl,bx,by,bw,0.34,col)
+    if ratio > 0.1:
+        tb(sl,f"{lbl}\n{pct}",bx+0.05,by,bw-0.1,0.34,size=11,bold=True,color=WHITE,align=PP_ALIGN.CENTER)
+    bx += bw
 
 # ─────────────────────────────────────────────────────────────────────────────
-# DIAPO 4 — Demande : Analyse qualitative
+# DIAPO 4 — DEMANDE QUALITATIVE
 # ─────────────────────────────────────────────────────────────────────────────
 sl = prs.slides.add_slide(BLANK)
-slide_header(sl, "2.2 Analyse qualitative de la demande", section_label="DEMANDE")
+dark_header(sl,"2.2 Analyse qualitative — Les acteurs",
+            subtitle="Qui achète ? Qui utilise ? Qui recommande ?",tag="DEMANDE")
 
-add_textbox(sl,
-    "Analyse du comportement d'achat du consommateur en s'appuyant sur les facteurs explicatifs.",
-    0.5, 1.5, 12.33, 0.5, font_size=16, italic=True, color=MID_BLUE)
-
-# 4 colonnes acteurs
-cols = [
-    ("Acheteur", ["• Parents d'élèves (30–50 ans)", "• Élèves eux-mêmes (dès le collège)", "• Écoles et centres de formation", "• Entreprises"]),
-    ("Utilisateur", ["• Élèves et étudiants (dès le collège)", "• Professionnels écrivant à la main", "• Personnes avec difficultés d'écriture", "• Apprenants d'une langue étrangère"]),
-    ("Prescripteur", ["• Enseignants et éducateurs spécialisés"]),
-    ("Influenceur", ["• Influenceurs éducatifs TikTok/Instagram", "• Médias parentaux et scolaires", "• Bouche-à-oreille scolaire"]),
+# 4 colonnes acteurs avec design carte
+actors = [
+    ("🛒","Acheteur",COBALT,["Parents d'élèves\n(30–50 ans)","Élèves eux-mêmes\n(dès le collège)","Entreprises","Écoles et centres\nde formation"]),
+    ("✏️","Utilisateur",RGBColor(0x0E,0x6B,0x5E),["Élèves et étudiants\n(dès le collège)","Professionnels\nécrivant à la main","Personnes avec\ndifficultés d'écriture","Apprenants d'une\nlangue étrangère"]),
+    ("🎓","Prescripteur",RGBColor(0x7B,0x3F,0x9E),["Enseignants et\néducateurs spécialisés","Orthophonistes","Conseillers\nd'orientation"]),
+    ("📣","Influenceur",RGBColor(0xC0,0x3A,0x2B),["Influenceurs éducatifs\nTikTok / Instagram","Médias parentaux\net scolaires","Bouche-à-oreille\nscolaire"]),
 ]
-col_w = 3.0
-for i, (title, items) in enumerate(cols):
-    x = 0.4 + i * 3.2
-    add_bullet_box(sl, items, x, 2.1, col_w, 3.0,
-                   title=title, title_color=WHITE,
-                   bg=DARK_BLUE if i%2==0 else MID_BLUE,
-                   font_size=14, title_size=16)
-    # override title color to white done in add_bullet_box title_color param
-    # but text also needs to be white
-    # redo with white text
-    # (already passed bg=DARK_BLUE, title_color=WHITE — text color still TEXT_DARK)
+for i,(icon,title,bg,items) in enumerate(actors):
+    x = 0.35 + i*3.25
+    rect(sl,x,1.72,3.05,5.5,bg)
+    tb(sl,icon,x,1.8,3.05,0.65,size=28,align=PP_ALIGN.CENTER,color=WHITE)
+    tb(sl,title,x,2.38,3.05,0.52,size=19,bold=True,color=GOLD,align=PP_ALIGN.CENTER)
+    rect(sl,x+0.2,2.88,2.65,0.05,RGBColor(0xFF,0xFF,0xFF))
+    for j,item in enumerate(items):
+        tb(sl,f"• {item}",x+0.2,3.0+j*0.62,2.65,0.58,size=13,color=WHITE)
 
-# fix text color — redo the boxes properly
-# Clear and redo
-# (we'll just rebuild with a helper)
-
-def add_actor_box(slide, title, items, x, y, w=3.0, h=3.0, dark=True):
-    bg = DARK_BLUE if dark else MID_BLUE
-    add_rect(slide, x, y, w, h, bg)
-    add_textbox(slide, title, x+0.1, y+0.1, w-0.2, 0.42,
-                font_size=17, bold=True, color=ORANGE, align=PP_ALIGN.CENTER)
-    tb = slide.shapes.add_textbox(Inches(x+0.1), Inches(y+0.6),
-                                   Inches(w-0.2), Inches(h-0.7))
-    tb.word_wrap = True
-    tf = tb.text_frame
-    tf.word_wrap = True
-    first = True
-    for item in items:
-        if first:
-            p = tf.paragraphs[0]; first = False
-        else:
-            p = tf.add_paragraph()
-        p.space_after = Pt(5)
-        r = p.add_run(); r.text = item
-        r.font.size = Pt(14); r.font.color.rgb = WHITE
-
-# Remove shapes added above and redo — simpler: just add on top
-# (pptx layers, so just add the correct boxes)
-for i, (title, items) in enumerate(cols):
-    x = 0.4 + i * 3.2
-    add_actor_box(sl, title, items, x, 2.1, col_w, 3.1, dark=(i%2==0))
-
-# Bottom note
-add_rect(sl, 0.4, 5.35, 12.53, 0.65, LIGHT_BLUE)
-add_textbox(sl,
-    "46,7 % des répondants ont déjà ressenti de la gêne à cause de leurs fautes (enquête). "
-    "Le Stylo Ortho répond à un besoin fonctionnel concret qui lève ce frein.",
-    0.6, 5.4, 12.1, 0.55, font_size=14, color=DARK_BLUE, bold=True)
+# Stat bas
+rect(sl,0.35,7.0,12.53,0.38,GOLD)
+tb(sl,"46,7 % des répondants ont déjà ressenti de la gêne à cause de leurs fautes — le Stylo Ortho lève ce frein.",
+   0.5,7.03,12.2,0.32,size=13,bold=True,color=INK,align=PP_ALIGN.CENTER)
 
 # ─────────────────────────────────────────────────────────────────────────────
-# DIAPO 5 — Facteurs individuels
+# DIAPO 5 — FACTEURS INDIVIDUELS
 # ─────────────────────────────────────────────────────────────────────────────
 sl = prs.slides.add_slide(BLANK)
-slide_header(sl, "Facteurs individuels", section_label="DEMANDE")
+dark_header(sl,"Facteurs individuels",
+            subtitle="Ce qui motive — ou freine — l'achat du Stylo Ortho",tag="DEMANDE")
 
 factors = [
-    ("Les besoins",
-     "Le besoin de corriger ses fautes est un besoin préexistant, souvent implicite et latent chez l'utilisateur. "
-     "Le Stylo Ortho le rend explicite et actionnable."),
-    ("Les motivations",
-     "• Motivation hédoniste : réussir à l'école ou au travail, écrire sans honte\n"
-     "• Motivation rationnelle : gagner du temps, éviter les erreurs en situation de manuscrit"),
-    ("Les freins",
-     "• Frein rationnel : prix de 99,90 € élevé par rapport à un stylo classique (1–5 €)\n"
-     "• Frein psychologique : crainte de paraître assisté ou de dépendre d'un outil"),
-    ("La perception",
-     "Le design du Stylo Ortho (stylo classique avec écran discret) crée une image de produit simple et non intrusif."),
-    ("Profil socio-démographique",
-     "Âge cible : 30–50 ans (parents acheteurs) et 11–25 ans (élèves et étudiants utilisateurs)"),
+    ("💡","Les besoins",COBALT,
+     "Besoin préexistant et latent de corriger ses fautes. Le Stylo Ortho le rend explicite et actionnable."),
+    ("🚀","Les motivations",RGBColor(0x0E,0x6B,0x5E),
+     "Hédoniste : réussir à l'école, écrire sans honte.\nRationnelle : gagner du temps, éviter les erreurs en manuscrit."),
+    ("🚧","Les freins",RGBColor(0xC0,0x3A,0x2B),
+     "Prix de 99,90 € élevé vs stylo classique (1–5 €).\nCrainte de paraître assisté ou dépendant d'un outil."),
+    ("👁","La perception",RGBColor(0x7B,0x3F,0x9E),
+     "Design classique avec écran discret → image de produit simple et non intrusif."),
+    ("👤","Profil cible",RGBColor(0x1A,0x4F,0x8A),
+     "30–50 ans (parents acheteurs) · 11–25 ans (élèves et étudiants utilisateurs)"),
 ]
-y = 1.55
-for i, (title, text) in enumerate(factors):
-    add_rect(sl, 0.4, y, 12.53, 0.95, WHITE if i%2==0 else GRAY_LIGHT)
-    add_textbox(sl, title, 0.5, y+0.05, 3.5, 0.42, font_size=15, bold=True, color=DARK_BLUE)
-    add_textbox(sl, text, 4.0, y+0.05, 9.0, 0.85, font_size=14, color=TEXT_DARK)
-    y += 0.98
+y = 1.75
+for icon,title,bg,text in factors:
+    h = 0.94
+    rect(sl,0.4,y,12.53,h,bg)
+    tb(sl,icon,0.55,y+(h-0.5)/2,0.6,0.5,size=22,align=PP_ALIGN.CENTER,color=WHITE)
+    tb(sl,title,1.25,y+0.08,2.8,0.42,size=16,bold=True,color=GOLD)
+    tb(sl,text,4.2,y+0.08,8.6,h-0.18,size=14,color=WHITE)
+    y += h+0.06
 
 # ─────────────────────────────────────────────────────────────────────────────
-# DIAPO 6 — Facteurs collectifs
+# DIAPO 6 — FACTEURS COLLECTIFS
 # ─────────────────────────────────────────────────────────────────────────────
 sl = prs.slides.add_slide(BLANK)
-slide_header(sl, "Facteurs collectifs", section_label="DEMANDE")
+dark_header(sl,"Facteurs collectifs",
+            subtitle="Culture, groupes de référence, cycle de vie familiale",tag="DEMANDE")
 
-factors_c = [
-    ("La culture",
-     "En France, la maîtrise de l'orthographe est un marqueur social fort. "
-     "Faire des fautes est perçu comme une lacune — le Stylo Ortho répond directement à cette pression culturelle."),
-    ("Les groupes de référence",
-     "• Groupe d'appartenance : camarades de classe, collègues\n"
-     "• Groupe d'aspiration : bons élèves, professionnels valorisant l'écrit soigné"),
-    ("Le cycle de vie familiale",
-     "• Famille avec enfants scolarisés : cible prioritaire — la rentrée scolaire déclenche l'achat\n"
-     "• Jeune actif entrant dans la vie professionnelle : cible secondaire"),
+# 3 grandes cartes
+collective = [
+    ("🇫🇷","La culture","En France, l'orthographe est un marqueur social fort. Faire des fautes est perçu comme une lacune. "
+     "Le Stylo Ortho répond directement à cette pression culturelle et scolaire.",COBALT),
+    ("👥","Groupes de référence","Appartenance : camarades de classe, collègues.\n"
+     "Aspiration : bons élèves, professionnels valorisant l'écrit soigné.",RGBColor(0x0E,0x6B,0x5E)),
+    ("👨‍👩‍👧","Cycle de vie familiale","Famille avec enfants scolarisés : cible prioritaire — la rentrée déclenche l'achat.\n"
+     "Jeune actif entrant dans la vie professionnelle : cible secondaire.",RGBColor(0x7B,0x3F,0x9E)),
 ]
-y = 1.6
-for i, (title, text) in enumerate(factors_c):
-    h = 1.6
-    add_rect(sl, 0.4, y, 12.53, h, WHITE if i%2==0 else GRAY_LIGHT)
-    add_textbox(sl, title, 0.5, y+0.1, 3.5, 0.45, font_size=16, bold=True, color=DARK_BLUE)
-    add_textbox(sl, text, 4.0, y+0.08, 9.0, h-0.2, font_size=15, color=TEXT_DARK)
-    y += h + 0.1
+for i,(icon,title,text,bg) in enumerate(collective):
+    x = 0.4 + i*4.3
+    rect(sl,x,1.72,4.1,3.8,bg)
+    tb(sl,icon,x,1.88,4.1,0.7,size=34,align=PP_ALIGN.CENTER,color=WHITE)
+    tb(sl,title,x+0.15,2.6,3.8,0.52,size=17,bold=True,color=GOLD,align=PP_ALIGN.CENTER)
+    rect(sl,x+0.4,3.1,3.3,0.05,WHITE)
+    tb(sl,text,x+0.2,3.22,3.7,2.2,size=14,color=WHITE,wrap=True)
 
-# Tri croisé
-add_rect(sl, 0.4, y, 12.53, 1.0, MID_BLUE)
-add_textbox(sl, "📊 Tri croisé — Intérêt pour le produit selon le profil (enquête n=214)",
-            0.6, y+0.05, 12, 0.38, font_size=15, bold=True, color=WHITE)
-add_textbox(sl,
-    "Les personnes faisant le plus souvent des fautes sont aussi les plus intéressées par le produit. "
-    "46,9 % des parents sont prêts à acheter le Stylo Ortho pour leur enfant.",
-    0.6, y+0.45, 12, 0.45, font_size=14, color=LIGHT_BLUE)
+# Tri croisé encadré
+rect(sl,0.4,5.72,12.53,1.55,LIGHT_BG)
+rect(sl,0.4,5.72,0.12,1.55,MINT)
+tb(sl,"📊 Tri croisé — Intérêt par profil (enquête n=214)",
+   0.65,5.82,12,0.42,size=16,bold=True,color=INK)
+tb(sl,"Les personnes faisant le plus souvent des fautes sont aussi les plus intéressées par le produit. "
+   "46,9 % des parents sont prêts à acheter le Stylo Ortho pour leur enfant. "
+   "75,2 % des professionnels voient son utilité pour leurs équipes ou élèves.",
+   0.65,6.28,12,0.85,size=14,color=SLATE)
 
 # ─────────────────────────────────────────────────────────────────────────────
-# DIAPO 7 — Situations d'achat
+# DIAPO 7 — SITUATIONS D'ACHAT
 # ─────────────────────────────────────────────────────────────────────────────
 sl = prs.slides.add_slide(BLANK)
-slide_header(sl, "Situations d'achat", section_label="DEMANDE")
+dark_header(sl,"Situations d'achat",
+            subtitle="Quand, comment et pourquoi le consommateur achète",tag="DEMANDE")
 
-add_bullet_box(sl,
-    ["Facteurs situationnels",
-     "• La rentrée scolaire (août–septembre) : pic d'achat principal — saisonnalité forte (+52,1 % CA en août vs décembre)",
-     "• Examens et concours : besoin ponctuel de correction en situation de manuscrit",
-     "• Cadeau de Noël ou anniversaire : achat impulsion pour un proche"],
-    0.4, 1.55, 12.53, 2.35,
-    title="Contexte situationnel", bg=WHITE, font_size=16, title_size=18)
+# Timeline saisonnière
+rect(sl,0.4,1.75,12.53,1.6,WHITE)
+tb(sl,"📅  Saisonnalité de l'achat",0.6,1.82,12,0.42,size=16,bold=True,color=INK)
+rect(sl,0.6,2.3,12.1,0.5,LIGHT_BG)
+months = ["Jan","Fév","Mar","Avr","Mai","Jun","Jul","Aoû","Sep","Oct","Nov","Déc"]
+heights = [0.15,0.12,0.12,0.12,0.15,0.12,0.2,0.5,0.5,0.2,0.18,0.35]  # proportionnel
+for i,(m,h) in enumerate(zip(months,heights)):
+    bx = 0.6 + i*(12.1/12)
+    bw = 12.1/12 - 0.04
+    col = CORAL if h>=0.4 else (GOLD if h>=0.2 else SKY)
+    rect(sl,bx,2.3+(0.5-h),bw,h,col)
+    tb(sl,m,bx,2.82,bw,0.25,size=9,color=SLATE,align=PP_ALIGN.CENTER)
+tb(sl,"🔴 Pic rentrée : +52,1 % CA en août vs décembre",0.6,3.28,12,0.35,size=13,color=CORAL,bold=True)
 
-add_bullet_box(sl,
-    ["Types d'achat",
-     "• Achat de nouveauté : le Stylo Ortho est un produit inconnu — forte implication à l'achat",
-     "• Achat réfléchi : prix de 99,90 € justifié par la valeur perçue (USP unique)",
-     "• Achat prescrit : recommandation d'un enseignant ou d'un parent"],
-    0.4, 4.05, 12.53, 2.2,
-    title="Types d'achat", bg=GRAY_LIGHT, font_size=16, title_size=18)
+# 3 cartes types d'achat
+buy_types = [
+    ("🆕","Achat de nouveauté","Produit inconnu — forte implication.\nDémonstration en magasin indispensable.",COBALT),
+    ("🤔","Achat réfléchi","Prix 99,90 € — achat planifié.\nJustifié par l'USP unique sur le marché.",RGBColor(0x0E,0x6B,0x5E)),
+    ("📋","Achat prescrit","Recommandation d'un enseignant\nou d'un parent — effet bouche-à-oreille.",RGBColor(0x7B,0x3F,0x9E)),
+]
+for i,(icon,title,text,bg) in enumerate(buy_types):
+    x = 0.4+i*4.32
+    rect(sl,x,3.72,4.1,2.5,bg)
+    tb(sl,icon,x,3.82,4.1,0.62,size=28,align=PP_ALIGN.CENTER,color=WHITE)
+    tb(sl,title,x+0.15,4.46,3.8,0.46,size=16,bold=True,color=GOLD,align=PP_ALIGN.CENTER)
+    tb(sl,text,x+0.2,4.98,3.7,1.1,size=14,color=WHITE)
 
-add_rect(sl, 0.4, 6.35, 12.53, 0.7, DARK_BLUE)
-add_textbox(sl,
-    "📊 Tri à plat : 56,6 % utilisent le correcteur téléphone et 43,4 % le correcteur Word — "
-    "mais aucun de ces outils ne fonctionne sur papier. Le Stylo Ortho est le seul outil qui fait ça sur papier.",
-    0.6, 6.4, 12.1, 0.6, font_size=14, color=WHITE)
+# Insight bas
+rect(sl,0.4,6.35,12.53,0.9,INK)
+tb(sl,"📊 56,6 % utilisent le correcteur téléphone · 43,4 % le correcteur Word — "
+   "mais aucun ne fonctionne sur papier. Le Stylo Ortho est le seul outil qui fait ça.",
+   0.6,6.5,12.1,0.65,size=15,color=WHITE,bold=True,align=PP_ALIGN.CENTER)
 
 # ─────────────────────────────────────────────────────────────────────────────
-# DIAPO 8 — Offre : Produits et segments
+# DIAPO 8 — OFFRE : PRODUITS ET SEGMENTS
 # ─────────────────────────────────────────────────────────────────────────────
 sl = prs.slides.add_slide(BLANK)
-slide_header(sl, "3.1 Analyse des produits et segments", section_label="OFFRE")
+dark_header(sl,"3.1 Produits et segments du marché",
+            subtitle="Où se positionne le Stylo Ortho dans le marché papeterie ?",tag="OFFRE")
 
-# En-tête tableau
-y = 1.55
-add_rect(sl, 0.4, y, 12.53, 0.42, DARK_BLUE)
-for x, w, label in [(0.42,2.8,"Segment"),(3.25,2.4,"Part de marché"),(5.68,2.5,"Évolution"),(8.2,4.7,"Position Stylo Ortho")]:
-    add_textbox(sl, label, x, y+0.04, w, 0.35, font_size=13, bold=True, color=WHITE)
-
-rows = [
-    ("Stylos classiques (BIC, Pilot…)", "≈ 60–65 %", "Stable à légèrement en recul (–2 à –3 % / an)", "Concurrent indirect — segment classique"),
-    ("Stylos effaçables (FriXion…)", "≈ 10–15 %", "En croissance — en vogue dans le scolaire", "Complémentaire : Stylo Ortho intègre encre effaçable"),
-    ("Stylos premium / luxe", "≈ 5–8 % (valeur)", "Stable — niche", "Inspiration positionnement premium"),
-    ("Fournitures scolaires France 2024", "332 M€ à la rentrée", "Recul –7 % en 2024 vs 2023", "Marché cible principal"),
-    ("Instruments d'écriture intelligents", "Quasi inexistant", "Fort potentiel", "🎯 Positionnement pionnier — aucun concurrent direct"),
+segments = [
+    ("📏","Stylos classiques\n(BIC, Pilot…)","≈ 60–65 %\ndu marché","Stable / léger recul","Concurrent\nindirect",SLATE),
+    ("✏️","Stylos effaçables\n(FriXion…)","≈ 10–15 %","En croissance","Complémentaire\n(encre effaçable)",RGBColor(0x2E,0x7D,0x52)),
+    ("💎","Stylos premium\n/ luxe","≈ 5–8 %","Stable — niche","Inspiration\npositionnement",RGBColor(0x7B,0x3F,0x9E)),
+    ("🧠","Instruments\nintelligents","Quasi\ninexistant","Fort\npotentiel","🎯 Terrain\nvierge",CORAL),
 ]
-for i, (seg, pm, evol, pos) in enumerate(rows):
-    y += 0.55
-    bg = WHITE if i%2==0 else GRAY_LIGHT
-    add_rect(sl, 0.4, y, 12.53, 0.53, bg)
-    for x, w, txt in [(0.42,2.8,seg),(3.25,2.4,pm),(5.68,2.5,evol),(8.2,4.7,pos)]:
-        add_textbox(sl, txt, x, y+0.05, w, 0.45, font_size=13,
-                    color=DARK_BLUE if txt==seg else TEXT_DARK,
-                    bold=(txt==seg))
+for i,(icon,name,pdm,evol,pos,bg) in enumerate(segments):
+    x = 0.4+i*3.22
+    rect(sl,x,1.75,3.05,4.4,bg)
+    tb(sl,icon,x,1.85,3.05,0.7,size=30,align=PP_ALIGN.CENTER,color=WHITE)
+    tb(sl,name,x+0.1,2.58,2.85,0.62,size=14,bold=True,color=GOLD,align=PP_ALIGN.CENTER)
+    rect(sl,x+0.3,3.2,2.45,0.05,WHITE)
+    tb(sl,"Part de marché",x+0.15,3.32,2.75,0.35,size=11,color=RGBColor(0xC8,0xD8,0xE8),italic=True)
+    tb(sl,pdm,x+0.15,3.62,2.75,0.55,size=15,bold=True,color=WHITE,align=PP_ALIGN.CENTER)
+    tb(sl,"Évolution",x+0.15,4.2,2.75,0.32,size=11,color=RGBColor(0xC8,0xD8,0xE8),italic=True)
+    tb(sl,evol,x+0.15,4.5,2.75,0.45,size=13,color=WHITE,align=PP_ALIGN.CENTER)
+    tb(sl,pos,x+0.15,4.98,2.75,0.55,size=13,bold=True,color=GOLD,align=PP_ALIGN.CENTER)
 
-add_rect(sl, 0.4, y+0.6, 12.53, 0.65, MID_BLUE)
-add_textbox(sl,
-    "📊 Tri à plat : 56,6 % utilisent le correcteur téléphone et 43,4 % le correcteur Word — "
-    "mais aucun de ces outils ne fonctionne sur papier. Opportunité unique pour le Stylo Ortho.",
-    0.6, y+0.65, 12.1, 0.55, font_size=14, color=WHITE)
+rect(sl,0.4,6.28,12.53,0.98,PALE_MINT)
+rect(sl,0.4,6.28,0.12,0.98,MINT)
+tb(sl,"📊 Tri à plat — 56,6 % utilisent le correcteur téléphone et 43,4 % le correcteur Word, "
+   "mais aucun ne fonctionne sur papier. "
+   "Le Stylo Ortho occupe un territoire inexploité.",
+   0.65,6.38,12,0.8,size=14,color=INK)
 
 # ─────────────────────────────────────────────────────────────────────────────
-# DIAPO 9 — Concurrents directs et indirects
+# DIAPO 9 — CONCURRENTS
 # ─────────────────────────────────────────────────────────────────────────────
 sl = prs.slides.add_slide(BLANK)
-slide_header(sl, "3.2 Concurrents directs et indirects", section_label="OFFRE")
+dark_header(sl,"3.2 Analyse concurrentielle",
+            subtitle="Concurrents directs (numérique) et indirects (papeterie)",tag="OFFRE")
 
-y = 1.55
-add_rect(sl, 0.4, y, 12.53, 0.42, DARK_BLUE)
-for x, w, lbl in [(0.42,1.4,"Type"),(1.85,1.7,"Concurrent"),(3.58,2.2,"PDM estimée"),(5.8,2.8,"Forces"),(8.63,4.1,"Limite face au Stylo Ortho")]:
-    add_textbox(sl, lbl, x, y+0.04, w, 0.35, font_size=13, bold=True, color=WHITE)
+# Split gauche/droite
+rect(sl,0.4,1.72,5.9,5.55,RGBColor(0xE8,0xF0,0xFB))
+rect(sl,6.45,1.72,6.48,5.55,RGBColor(0xFF,0xED,0xED))
+rect(sl,0.4,1.72,5.9,0.52,COBALT)
+rect(sl,6.45,1.72,6.48,0.52,RGBColor(0xC0,0x3A,0x2B))
+tb(sl,"INDIRECTS — Papeterie",0.4,1.77,5.9,0.42,size=15,bold=True,color=WHITE,align=PP_ALIGN.CENTER)
+tb(sl,"DIRECTS — Numérique",6.45,1.77,6.48,0.42,size=15,bold=True,color=WHITE,align=PP_ALIGN.CENTER)
 
-rows_c = [
-    ("Indirecte", "BIC", "≈ 20–25 % stylos France", "Notoriété mondiale, prix très bas, réseau massif", "Aucune technologie de correction intégrée"),
-    ("Indirecte", "Pilot / Stabilo / Pentel", "≈ 15–20 % cumulés", "Innovation stylos effaçables (FriXion)", "Pas de capacité de correction orthographique"),
-    ("Directe\n(numérique)", "Microsoft Word /\nGoogle Docs", "≈ 43,4 % utilisateurs", "Intégré aux outils bureautiques, gratuit", "Inutilisable sur papier ou en examen manuscrit"),
-    ("Directe\n(numérique)", "Correcteur téléphone", "≈ 56,6 % utilisateurs", "Gratuit, accessible partout, instantané", "Ne fonctionne pas lors d'une rédaction manuscrite"),
-    ("Directe\n(numérique)", "Grammarly / Antidote", "Niche", "Très performants à l'écrit numérique", "Réservés au numérique, payants, non utilisables sur papier"),
+indirect = [
+    ("BIC","≈ 20–25 % marché stylos","Notoriété mondiale, prix très bas","❌ Aucune correction intégrée"),
+    ("Pilot / Stabilo / Pentel","≈ 15–20 % cumulés","Innovation stylos effaçables","❌ Pas de correction ortho"),
 ]
-for i, (typ, conc, pdm, forces, limite) in enumerate(rows_c):
-    y += 0.56
-    bg = WHITE if i%2==0 else GRAY_LIGHT
-    add_rect(sl, 0.4, y, 12.53, 0.54, bg)
-    for x, w, txt, bld in [(0.42,1.4,typ,False),(1.85,1.7,conc,True),(3.58,2.2,pdm,False),(5.8,2.8,forces,False),(8.63,4.1,limite,False)]:
-        add_textbox(sl, txt, x, y+0.04, w, 0.48, font_size=12,
-                    color=DARK_BLUE if bld else TEXT_DARK, bold=bld)
+for i,(name,pdm,force,limite) in enumerate(indirect):
+    y = 2.42+i*1.35
+    rect(sl,0.55,y,5.6,1.22,WHITE)
+    tb(sl,name,0.72,y+0.1,3.0,0.42,size=15,bold=True,color=COBALT)
+    tb(sl,pdm,0.72,y+0.52,3.0,0.35,size=12,color=SLATE,italic=True)
+    tb(sl,f"✅ {force}",0.72,y+0.78,2.6,0.35,size=12,color=RGBColor(0x0E,0x6B,0x5E))
+    tb(sl,limite,3.4,y+0.1,2.6,0.75,size=12,color=CORAL,bold=True)
 
-add_rect(sl, 0.4, y+0.62, 12.53, 0.58, DARK_BLUE)
-add_textbox(sl,
-    "🎯 Le Stylo Ortho occupe un territoire inexploité. Même les personnes n'étant pas sa cible directe "
-    "reconnaissent l'utilité du produit pour les autres — effet de prescription fort.",
-    0.6, y+0.67, 12.1, 0.48, font_size=14, color=WHITE)
+direct = [
+    ("Correcteur téléphone","≈ 56,6 % utilisateurs","Gratuit, partout, instantané","❌ Hors papier"),
+    ("Microsoft Word /\nGoogle Docs","≈ 43,4 % utilisateurs","Intégré, gratuit","❌ Inutilisable manuscrit"),
+    ("Grammarly / Antidote","Niche","Très performant à l'écrit","❌ Réservé numérique"),
+]
+for i,(name,pdm,force,limite) in enumerate(direct):
+    y = 2.42+i*1.0
+    rect(sl,6.6,y,6.15,0.88,WHITE)
+    tb(sl,name,6.75,y+0.07,3.2,0.42,size=14,bold=True,color=RGBColor(0xC0,0x3A,0x2B))
+    tb(sl,pdm,6.75,y+0.5,2.0,0.3,size=11,color=SLATE,italic=True)
+    tb(sl,limite,9.1,y+0.07,3.5,0.75,size=12,color=CORAL,bold=True)
+    tb(sl,f"✅ {force}",6.75,y+0.57,3.0,0.28,size=11,color=RGBColor(0x0E,0x6B,0x5E))
+
+rect(sl,0.4,6.42,12.53,0.85,INK)
+tb(sl,"🎯 Le Stylo Ortho occupe un territoire inexploité : "
+   "correction en temps réel sur papier, sans internet — aucun concurrent direct.",
+   0.6,6.57,12.1,0.6,size=15,bold=True,color=WHITE,align=PP_ALIGN.CENTER)
 
 # ─────────────────────────────────────────────────────────────────────────────
-# DIAPO 10 — Analyse des distributeurs
+# DIAPO 10 — DISTRIBUTEURS
 # ─────────────────────────────────────────────────────────────────────────────
 sl = prs.slides.add_slide(BLANK)
-slide_header(sl, "3.3 Analyse des distributeurs", section_label="OFFRE")
+dark_header(sl,"3.3 Stratégie de distribution",
+            subtitle="Priorités et circuits de mise sur le marché",tag="OFFRE")
 
-y = 1.55
-add_rect(sl, 0.4, y, 12.53, 0.42, DARK_BLUE)
-for x, w, lbl in [(0.42,2.5,"Distributeur"),(2.95,1.8,"Circuit"),(4.78,1.8,"PDM valeur"),(6.6,1.7,"Évolution"),(8.33,4.6,"Politique Stylo Ortho")]:
-    add_textbox(sl, lbl, x, y+0.04, w, 0.35, font_size=13, bold=True, color=WHITE)
-
-rows_d = [
-    ("Bureau Vallée, Cultura, Fnac", "Spécialistes\n(circuit court)", "≈ 15–20 %", "+3 % (2020)", "✅ Priorité 1 — Démonstration possible en rayon. Distribution sélective au lancement."),
-    ("Amazon, Fnac.com", "E-commerce\n(ultra-court)", "≈ 49 %\ntransactions", "+15 %/an", "✅ Priorité 2 — Distribution directe via stylo-ortho.fr + Amazon. Marge maîtrisée."),
-    ("Carrefour, E.Leclerc", "Grandes surfaces\n(circuit long)", "332 M€ rentrée 2024", "–7 % (2024)", "⏳ Phase 2 uniquement — après notoriété établie."),
-    ("Établissements scolaires / B2B", "Circuit direct\n(sélectif)", "Non quantifié\n(fort potentiel)", "En développement", "🤝 Partenariat Ministère Éducation nationale — phase de test."),
+distrib = [
+    ("1","Bureau Vallée · Fnac · Cultura","Circuit spécialisé (court)","≈ 15–20 %",
+     "Démonstration produit possible en rayon.\nEssentiel pour un produit innovant → Priorité 1.",COBALT),
+    ("2","Amazon · Fnac.com · stylo-ortho.fr","E-commerce (ultra-court)","≈ 49 %",
+     "Parents qui achètent en ligne.\nMarge maîtrisée — forte progression +15 %/an → Priorité 2.",RGBColor(0x0E,0x6B,0x5E)),
+    ("⏳","Carrefour · E.Leclerc","Grandes surfaces (circuit long)","332 M€ rentrée",
+     "Phase 2 uniquement — après notoriété établie.\nRecul –7 % en 2024 → approche prudente.",SLATE),
+    ("🤝","Lycées · Collèges · Entreprises","Circuit direct B2B","Fort potentiel",
+     "Partenariat Ministère Éducation nationale.\nObjectif : 500 stylos An 1, 2 000+ An 2.",RGBColor(0x7B,0x3F,0x9E)),
 ]
-for i, (dist, circ, pdm, evol, pol) in enumerate(rows_d):
-    y += 0.68
-    bg = WHITE if i%2==0 else GRAY_LIGHT
-    add_rect(sl, 0.4, y, 12.53, 0.66, bg)
-    for x, w, txt, bld in [(0.42,2.5,dist,True),(2.95,1.8,circ,False),(4.78,1.8,pdm,False),(6.6,1.7,evol,False),(8.33,4.6,pol,False)]:
-        add_textbox(sl, txt, x, y+0.05, w, 0.58, font_size=12,
-                    color=DARK_BLUE if bld else TEXT_DARK, bold=bld)
+y = 1.75
+for badge,name,circuit,pdm,text,bg in distrib:
+    h = 1.28
+    rect(sl,0.4,y,12.53,h,LIGHT_BG)
+    rect(sl,0.4,y,1.5,h,bg)
+    tb(sl,badge,0.4,y+(h-0.55)/2,1.5,0.55,size=28,bold=True,color=WHITE,align=PP_ALIGN.CENTER)
+    tb(sl,name,2.0,y+0.1,4.5,0.48,size=16,bold=True,color=INK)
+    tb(sl,circuit,2.0,y+0.58,3.5,0.35,size=13,color=SLATE,italic=True)
+    rect(sl,6.6,y+0.2,0.05,h-0.4,COBALT)
+    tb(sl,f"PDM : {pdm}",6.75,y+0.1,2.0,0.42,size=13,bold=True,color=bg)
+    tb(sl,text,6.75,y+0.52,5.8,0.72,size=13,color=SLATE)
+    y += h+0.07
 
 # ─────────────────────────────────────────────────────────────────────────────
 # DIAPO 11 — PESTEL
 # ─────────────────────────────────────────────────────────────────────────────
 sl = prs.slides.add_slide(BLANK)
-slide_header(sl, "3.4 Analyse PESTEL", section_label="OFFRE")
-
-y = 1.55
-add_rect(sl, 0.4, y, 12.53, 0.42, DARK_BLUE)
-add_textbox(sl, "Facteur", 0.42, y+0.04, 1.5, 0.35, font_size=13, bold=True, color=WHITE)
-add_textbox(sl, "Opportunités — influence positive", 1.95, y+0.04, 5.3, 0.35, font_size=13, bold=True, color=RGBColor(0x7F,0xFF,0xB0))
-add_textbox(sl, "Menaces / Risques — influence négative", 7.28, y+0.04, 5.6, 0.35, font_size=13, bold=True, color=RGBColor(0xFF,0xB0,0xB0))
+dark_header(sl,"3.4 Analyse PESTEL",
+            subtitle="Environnement macro-économique du Stylo Ortho",tag="OFFRE")
 
 pestel = [
-    ("🏛 Politique",
-     "Politiques publiques favorisant l'éducation et la lutte contre l'illettrisme",
-     "Réglementations sur composants électroniques en milieu scolaire. Certifications obligatoires."),
-    ("💶 Économique",
-     "Marché en croissance sur le segment innovation. Budget scolaire des familles stable.",
-     "Pouvoir d'achat sous pression — produit à 99,90 € positionné comme achat réfléchi."),
-    ("👥 Socioculturel",
-     "Importance de l'orthographe en France. Dyslexie (5–10 % population). 300 M de francophones.",
-     "Résistance au changement de certains enseignants. Habitude du stylo classique."),
-    ("🔬 Technologique",
-     "Développement des outils numériques, innovation stylos intelligents, progrès composants électroniques.",
-     "Évolution rapide de l'IA — risque de substitution numérique à moyen terme."),
-    ("🌱 Écologique",
-     "Produit rechargeable (USB-C) — faible empreinte vs stylos jetables.",
-     "Demande de réduction du plastique. Normes de recyclabilité renforcées en Europe."),
-    ("⚖ Légal",
-     "Normes européennes maîtrisables. Assemblage Nicomatic en France facilite la conformité CE.",
-     "Réglementation composants électroniques, conformité produits enfants. Dépôt de brevet nécessaire."),
+    ("🏛","Politique",COBALT,
+     "Politiques éducation et lutte contre\nl'illettrisme favorables",
+     "Réglementations électronique scolaire\nCertifications obligatoires"),
+    ("💶","Économique",RGBColor(0x0E,0x6B,0x5E),
+     "Marché innovation en croissance\nBudget scolaire familles stable",
+     "Pouvoir d'achat sous pression\n(99,90 € = achat réfléchi)"),
+    ("👥","Socioculturel",RGBColor(0x7B,0x3F,0x9E),
+     "Orthographe = marqueur social en France\n300 M francophones · Dyslexie 5–10 %",
+     "Résistance enseignants\nHabitude stylo classique"),
+    ("🔬","Technologique",RGBColor(0xC0,0x3A,0x2B),
+     "Progrès composants électroniques\nStylos connectés en développement",
+     "Évolution rapide IA\nRisque substitution à terme"),
+    ("🌱","Écologique",RGBColor(0x1A,0x7A,0x5E),
+     "Produit rechargeable USB-C\nFaible empreinte vs stylos jetables",
+     "Normes recyclabilité Europe\nDemande réduction plastique"),
+    ("⚖","Légal",SLATE,
+     "Normes EU maîtrisables\nAssemblage France → conformité CE",
+     "Conformité produits enfants\nDépôt de brevet nécessaire"),
 ]
-for i, (fac, opp, men) in enumerate(pestel):
-    y += 0.49
-    bg = WHITE if i%2==0 else GRAY_LIGHT
-    add_rect(sl, 0.4, y, 12.53, 0.47, bg)
-    add_textbox(sl, fac, 0.42, y+0.04, 1.5, 0.40, font_size=12, bold=True, color=DARK_BLUE)
-    add_textbox(sl, opp, 1.95, y+0.04, 5.3, 0.40, font_size=12, color=TEXT_DARK)
-    add_textbox(sl, men, 7.28, y+0.04, 5.6, 0.40, font_size=12, color=TEXT_DARK)
+cols = 3
+for i,(icon,title,bg,opp,men) in enumerate(pestel):
+    row = i//cols; col = i%cols
+    x = 0.4 + col*4.3
+    y = 1.72 + row*2.72
+    rect(sl,x,y,4.1,2.55,bg)
+    tb(sl,icon+" "+title,x+0.15,y+0.1,3.8,0.52,size=16,bold=True,color=GOLD)
+    rect(sl,x+0.15,y+0.65,3.8,0.05,WHITE)
+    tb(sl,"✅ "+opp,x+0.15,y+0.78,3.75,0.9,size=12,color=WHITE)
+    tb(sl,"⚠️ "+men,x+0.15,y+1.62,3.75,0.82,size=12,color=RGBColor(0xFF,0xD0,0xB0))
 
 # ─────────────────────────────────────────────────────────────────────────────
-# DIAPO 12 — Opportunités et Menaces
+# DIAPO 12 — OPPORTUNITÉS & MENACES
 # ─────────────────────────────────────────────────────────────────────────────
 sl = prs.slides.add_slide(BLANK)
-slide_header(sl, "Opportunités et Menaces", section_label="SYNTHÈSE")
+dark_header(sl,"Opportunités & Menaces",
+            subtitle="Synthèse stratégique du marché",tag="SYNTHÈSE")
 
-add_bullet_box(sl,
-    ["Le besoin croissant d'outils pédagogiques innovants et personnalisés",
-     "Le segment des stylos intelligents est quasi inexistant en France → positionnement pionnier",
-     "82,3 % des répondants intéressés ou potentiellement intéressés (enquête n=214)",
-     "Assemblage en France (Nicomatic) — conformité CE et argument marketing fort",
-     "Distribution sélective (Bureau Vallée, Fnac) → démonstration produit possible",
-     "49 % des transactions papeterie passent par l'e-commerce → canal direct fort"],
-    0.4, 1.55, 6.1, 5.55,
-    title="✅ Opportunités", title_color=RGBColor(0x00,0x80,0x40), bg=RGBColor(0xE8,0xF8,0xEE),
-    font_size=15, title_size=19)
+rect(sl,0.4,1.72,6.1,5.55,RGBColor(0xE8,0xF9,0xF2))
+rect(sl,6.65,1.72,6.28,5.55,RGBColor(0xFF,0xED,0xED))
+rect(sl,0.4,1.72,6.1,0.55,RGBColor(0x0E,0x6B,0x5E))
+rect(sl,6.65,1.72,6.28,0.55,RGBColor(0xC0,0x3A,0x2B))
+tb(sl,"✅  OPPORTUNITÉS",0.4,1.78,6.1,0.44,size=17,bold=True,color=WHITE,align=PP_ALIGN.CENTER)
+tb(sl,"⚠️  MENACES",6.65,1.78,6.28,0.44,size=17,bold=True,color=WHITE,align=PP_ALIGN.CENTER)
 
-add_bullet_box(sl,
-    ["La concurrence des outils numériques (correcteurs, IA, GPT)",
-     "Prix de 99,90 € perçu comme élevé vs stylo classique (1–5 €)",
-     "Recul du marché papeterie : –7 % en 2024 vs 2023",
-     "Résistance culturelle de certains enseignants au changement",
-     "Évolution rapide de l'IA — risque de substitution à moyen terme",
-     "Certifications et réglementations produits électroniques enfants"],
-    6.63, 1.55, 6.1, 5.55,
-    title="⚠️ Menaces", title_color=RGBColor(0xCC,0x00,0x00), bg=RGBColor(0xFD,0xED,0xED),
-    font_size=15, title_size=19)
-
-add_textbox(sl,
-    "Le marché des stylos intelligents représente une opportunité innovante et encore peu exploitée dans la papeterie. "
-    "Le Stylo Ortho est positionné pour en être le leader grâce à son USP unique : correction en temps réel sur papier, sans internet.",
-    0.4, 6.7, 12.53, 0.65, font_size=15, color=DARK_BLUE, bold=True, align=PP_ALIGN.CENTER)
-
-# ─────────────────────────────────────────────────────────────────────────────
-# DIAPO 13 — Concept produit
-# ─────────────────────────────────────────────────────────────────────────────
-sl = prs.slides.add_slide(BLANK)
-slide_header(sl, "Concept produit — Stylo Ortho", section_label="MARKETING")
-
-add_textbox(sl,
-    "Un stylo classique enrichi d'une technologie intégrée de correction orthographique "
-    "en temps réel — discret, rechargeable, assemblé en France.",
-    0.5, 1.55, 12.33, 0.75, font_size=18, italic=True, color=MID_BLUE)
-
-chars = [
-    ("Recharge USB-C", "15 min de charge", "Pratique pour les élèves et professionnels du quotidien"),
-    ("Encre rechargeable", "Moderne et économique", "Plus pratique et économique que les stylos à jeter"),
-    ("Gomme effaçable", "Au bout du stylo", "Pas besoin de correcteur blanc — usage fluide"),
-    ("Écran intégré", "Affiche les corrections en rouge", "Correction immédiate en temps réel — USP unique sur le marché"),
-    ("Design ergonomique", "Léger, usage longue durée", "Adapté à tous : élèves dès le collège, étudiants, professionnels"),
-    ("4 couleurs", "Noir, Bleu, Rouge, Vert", "Personnalisation et adaptation aux préférences"),
+opps = [
+    "Besoin croissant d'outils pédagogiques innovants",
+    "Segment stylos intelligents quasi inexistant en France\n→ positionnement pionnier",
+    "82,3 % des répondants intéressés (n=214)",
+    "Assemblage France (Nicomatic) → argument marketing et conformité CE",
+    "49 % des transactions papeterie en e-commerce\n→ canal direct fort",
+    "Rentrée scolaire : pic achat prévisible et massif",
 ]
-row_h = 0.72
+threats = [
+    "Concurrence outils numériques (correcteurs, IA, GPT)",
+    "Prix 99,90 € perçu comme élevé vs stylo classique (1–5 €)",
+    "Recul marché papeterie : –7 % en 2024 vs 2023",
+    "Résistance culturelle de certains enseignants",
+    "Évolution rapide de l'IA — risque substitution à moyen terme",
+    "Certifications et réglementations produits électroniques enfants",
+]
 y = 2.45
-for i, (car, desc, avan) in enumerate(chars):
-    bg = WHITE if i%2==0 else GRAY_LIGHT
-    add_rect(sl, 0.4, y, 12.53, row_h, bg)
-    add_textbox(sl, car, 0.5, y+0.1, 2.8, 0.55, font_size=14, bold=True, color=DARK_BLUE)
-    add_textbox(sl, desc, 3.35, y+0.1, 3.0, 0.55, font_size=14, color=MID_BLUE)
-    add_textbox(sl, avan, 6.38, y+0.1, 6.4, 0.55, font_size=14, color=TEXT_DARK)
-    y += row_h
+for opp,thr in zip(opps,threats):
+    tb(sl,f"  • {opp}",0.55,y,5.8,0.72,size=13,color=RGBColor(0x0E,0x4A,0x2E))
+    tb(sl,f"  • {thr}",6.8,y,6.0,0.72,size=13,color=RGBColor(0x7A,0x10,0x10))
+    y += 0.74
 
-add_kpi(sl, "86,4 %", "jugent le Stylo Ortho utile ou très utile (enquête)", 0.4, 6.55, 12.53, 0.75)
+rect(sl,0.4,6.88,12.53,0.5,INK)
+tb(sl,"Le Stylo Ortho est positionné pour être le leader d'un marché pionnier grâce à son USP unique : "
+   "correction en temps réel sur papier, sans internet.",
+   0.6,6.9,12.1,0.45,size=14,bold=True,color=WHITE,align=PP_ALIGN.CENTER)
 
 # ─────────────────────────────────────────────────────────────────────────────
-# DIAPO 14 — Segments
+# DIAPO 13 — CONCEPT PRODUIT
 # ─────────────────────────────────────────────────────────────────────────────
 sl = prs.slides.add_slide(BLANK)
-slide_header(sl, "Segmentation du marché", section_label="MARKETING")
+rect(sl,0,0,13.33,7.5,INK)
+rect(sl,0,0,5.5,7.5,COBALT)
+section_tag(sl,"CONCEPT PRODUIT")
+
+tb(sl,"Concept\nProduit",0.4,1.0,4.8,1.8,size=38,bold=True,color=WHITE)
+rect(sl,0.4,2.78,4.5,0.08,GOLD)
+tb(sl,"Un stylo classique enrichi d'une\ntechnologie discrète de correction\northographique en temps réel.",
+   0.4,2.95,4.7,1.5,size=17,color=SKY)
+
+# Partenaires bas gauche
+tb(sl,"Partenaires :",0.4,5.2,4.7,0.38,size=13,bold=True,color=GOLD)
+mtb(sl,["🇨🇳 Shenzhen Apec — électronique",
+        "🇯🇵 Pentel / Aihao — encre effaçable",
+        "🇫🇷 Nicomatic — assemblage final"],
+    0.4,5.58,4.8,1.4,size=13,color=WHITE)
+
+# Fonctionnalités droite
+features = [
+    ("⚡","Recharge USB-C","15 min de charge — pratique au quotidien",COBALT),
+    ("🖊","Écran intégré","Correction en rouge, orthographe proposée",RGBColor(0xC0,0x3A,0x2B)),
+    ("🔄","Encre rechargeable","Économique vs stylos jetables",RGBColor(0x0E,0x6B,0x5E)),
+    ("✏️","Gomme effaçable","Usage fluide, pas de correcteur blanc",RGBColor(0x7B,0x3F,0x9E)),
+    ("🎨","4 couleurs","Noir · Bleu · Rouge · Vert",SLATE),
+    ("🏃","Design ergonomique","Léger, toutes durées d'utilisation",RGBColor(0x2E,0x5F,0x9E)),
+]
+fy=1.5
+for i,(icon,title,desc,bg) in enumerate(features):
+    row=i//2; col=i%2
+    x=5.8+col*3.7; y=fy+row*1.82
+    rect(sl,x,y,3.45,1.65,bg)
+    tb(sl,icon,x+0.12,y+0.15,0.55,0.5,size=24,color=WHITE)
+    tb(sl,title,x+0.75,y+0.15,2.55,0.45,size=14,bold=True,color=GOLD)
+    tb(sl,desc,x+0.75,y+0.6,2.55,0.8,size=13,color=WHITE)
+
+# ─────────────────────────────────────────────────────────────────────────────
+# DIAPO 14 — SEGMENTS
+# ─────────────────────────────────────────────────────────────────────────────
+sl = prs.slides.add_slide(BLANK)
+dark_header(sl,"Segmentation du marché",
+            subtitle="Qui sont nos clients ? Qui cibler en priorité ?",tag="MARKETING")
 
 segs = [
-    ("🎯 Parents d'élèves", "30–50 ans, acheteurs principaux",
-     "46,9 % prêts à acheter pour leur enfant (enquête)", "CIBLE PRINCIPALE", DARK_BLUE),
-    ("🎯 Élèves et étudiants", "11–25 ans, utilisateurs directs",
-     "45 % font des fautes souvent ou très souvent (enquête)", "CIBLE SECONDAIRE", MID_BLUE),
-    ("Professionnels / Enseignants", "25–50 ans, prescripteurs",
-     "75,2 % voient l'utilité du produit pour leurs élèves ou collègues (enquête)", "CIBLE TERTIAIRE", RGBColor(0x2E,0x7D,0x52)),
+    ("🎯","Parents d'élèves","30–50 ans — acheteurs principaux","46,9 % prêts à acheter\npour leur enfant (enquête)",COBALT,"CIBLE PRINCIPALE"),
+    ("✏️","Élèves & Étudiants","11–25 ans — utilisateurs directs","45 % font des fautes\nsouvent ou très souvent",RGBColor(0x0E,0x6B,0x5E),"CIBLE SECONDAIRE"),
+    ("🎓","Professionnels & Enseignants","25–50 ans — prescripteurs","75,2 % voient l'utilité\npour élèves / collègues",RGBColor(0x7B,0x3F,0x9E),"PRESCRIPTEURS"),
 ]
-y = 1.6
-for seg, profil, chiffre, badge, color in segs:
-    add_rect(sl, 0.4, y, 12.53, 1.5, color)
-    add_textbox(sl, badge, 10.5, y+0.1, 2.3, 0.38, font_size=13, bold=True, color=ORANGE, align=PP_ALIGN.RIGHT)
-    add_textbox(sl, seg, 0.6, y+0.1, 8.5, 0.55, font_size=20, bold=True, color=WHITE)
-    add_textbox(sl, profil, 0.6, y+0.65, 5.5, 0.45, font_size=15, color=LIGHT_BLUE)
-    add_textbox(sl, f"📊 {chiffre}", 6.2, y+0.65, 6.5, 0.45, font_size=15, color=ORANGE)
-    y += 1.65
+for i,(icon,name,profil,chiffre,bg,badge) in enumerate(segs):
+    y = 1.72 + i*1.62
+    rect(sl,0.4,y,12.53,1.52,bg)
+    tb(sl,icon,0.55,y+0.45,0.8,0.7,size=30,color=WHITE,align=PP_ALIGN.CENTER)
+    tb(sl,name,1.5,y+0.12,4.5,0.55,size=20,bold=True,color=GOLD)
+    tb(sl,profil,1.5,y+0.68,4.5,0.45,size=14,color=WHITE,italic=True)
+    rect(sl,6.2,y+0.2,0.05,1.1,RGBColor(0xFF,0xFF,0xFF))
+    tb(sl,"📊 "+chiffre,6.4,y+0.18,4.2,0.8,size=16,bold=True,color=WHITE)
+    rect(sl,10.8,y+0.08,1.95,0.45,GOLD)
+    tb(sl,badge,10.8,y+0.1,1.95,0.42,size=11,bold=True,color=INK,align=PP_ALIGN.CENTER)
 
-add_rect(sl, 0.4, y, 12.53, 1.3, GRAY_LIGHT)
-add_textbox(sl, "Stratégie retenue : Indifférenciée",
-            0.6, y+0.1, 8, 0.45, font_size=18, bold=True, color=DARK_BLUE)
-add_textbox(sl,
-    "Le Stylo Ortho s'adresse à toute personne ayant besoin d'écrire sans fautes — élèves, étudiants, "
-    "professionnels, apprenants. La campagne de communication cible néanmoins en priorité les parents "
-    "et les élèves (rentrée scolaire).",
-    0.6, y+0.55, 12.1, 0.65, font_size=14, color=TEXT_DARK)
-
-# ─────────────────────────────────────────────────────────────────────────────
-# DIAPO 15 — Ciblage, Positionnement
-# ─────────────────────────────────────────────────────────────────────────────
-sl = prs.slides.add_slide(BLANK)
-slide_header(sl, "Ciblage et Positionnement", section_label="MARKETING")
-
-add_bullet_box(sl,
-    ["Cible principale : Parents d'élèves (30–50 ans) — 46,9 % prêts à acheter (enquête)",
-     "Cible secondaire : Élèves et étudiants (11–25 ans) — 45 % font souvent des fautes",
-     "Cible tertiaire : Professionnels et enseignants — prescripteurs et ambassadeurs",
-     "Stratégie indifférenciée : un seul produit, une seule gamme, pour tous les profils"],
-    0.4, 1.55, 12.53, 2.4,
-    title="Ciblage", bg=WHITE, font_size=16, title_size=19)
-
-add_rect(sl, 0.4, 4.1, 12.53, 0.48, DARK_BLUE)
-add_textbox(sl, "Positionnement", 0.55, 4.15, 12, 0.38, font_size=19, bold=True, color=WHITE)
-
-add_rect(sl, 0.4, 4.58, 12.53, 1.3, LIGHT_BLUE)
-add_textbox(sl,
-    "Dans la tête du consommateur, le Stylo Ortho doit être perçu comme :",
-    0.6, 4.63, 12.1, 0.42, font_size=16, color=DARK_BLUE)
-add_textbox(sl,
-    "« Le stylo intelligent qui corrige mes fautes quand j'écris à la main »",
-    0.6, 5.05, 12.1, 0.72, font_size=22, bold=True, color=DARK_BLUE, align=PP_ALIGN.CENTER)
-
-add_bullet_box(sl,
-    ["Axe fonctionnel : correction orthographique en temps réel sur papier — USP unique",
-     "Axe émotionnel : confiance en soi, réussite scolaire et professionnelle",
-     "Axe symbolique : produit made in France, innovant, discret et non intrusif"],
-    0.4, 6.0, 12.53, 1.35,
-    bg=GRAY_LIGHT, font_size=15)
+rect(sl,0.4,6.72,12.53,0.65,LIGHT_BG)
+rect(sl,0.4,6.72,0.12,0.65,MINT)
+tb(sl,"Stratégie indifférenciée : un seul produit pour tous les profils. "
+   "Communication en priorité sur les parents et élèves lors de la rentrée scolaire.",
+   0.65,6.8,12,0.52,size=14,bold=True,color=INK)
 
 # ─────────────────────────────────────────────────────────────────────────────
-# DIAPO 16 — Bénéfice consommateur
+# DIAPO 15 — CIBLAGE & POSITIONNEMENT
 # ─────────────────────────────────────────────────────────────────────────────
 sl = prs.slides.add_slide(BLANK)
-slide_header(sl, "Bénéfice consommateur", section_label="MARKETING")
+rect(sl,0,0,13.33,7.5,OFF_WHITE)
+rect(sl,0,0,13.33,1.55,INK)
+section_tag(sl,"MARKETING")
+slide_title(sl,"Ciblage & Positionnement")
+
+# Ciblage — 3 bulles
+rect(sl,0.4,1.68,5.9,3.6,LIGHT_BG)
+rect(sl,0.4,1.68,5.9,0.5,COBALT)
+tb(sl,"CIBLAGE",0.4,1.72,5.9,0.42,size=16,bold=True,color=WHITE,align=PP_ALIGN.CENTER)
+targets = [
+    ("🥇 Parents d'élèves","46,9 % prêts à acheter",COBALT),
+    ("🥈 Élèves & étudiants","45 % font souvent des fautes",RGBColor(0x0E,0x6B,0x5E)),
+    ("🥉 Professionnels","75,2 % voient l'utilité",RGBColor(0x7B,0x3F,0x9E)),
+]
+for i,(name,stat,col) in enumerate(targets):
+    y2 = 2.28+i*0.97
+    rect(sl,0.55,y2,5.6,0.84,col)
+    tb(sl,name,0.72,y2+0.1,3.5,0.42,size=15,bold=True,color=WHITE)
+    tb(sl,stat,4.3,y2+0.1,1.7,0.42,size=13,color=GOLD,bold=True,align=PP_ALIGN.RIGHT)
+
+# Positionnement — grande carte
+rect(sl,6.5,1.68,6.48,3.6,INK)
+rect(sl,6.5,1.68,6.48,0.5,COBALT)
+tb(sl,"POSITIONNEMENT",6.5,1.72,6.48,0.42,size=16,bold=True,color=WHITE,align=PP_ALIGN.CENTER)
+tb(sl,"Dans la tête du consommateur :",6.7,2.28,6.1,0.4,size=14,color=SKY,italic=True)
+rect(sl,6.7,2.75,6.0,0.06,GOLD)
+tb(sl,"« Le stylo intelligent\nqui corrige mes fautes\nquand j'écris à la main »",
+   6.7,2.88,6.0,1.55,size=22,bold=True,color=WHITE,align=PP_ALIGN.CENTER)
+tb(sl,"Axe fonctionnel · Émotionnel · Made in France",6.7,4.45,6.0,0.42,
+   size=13,color=SKY,italic=True,align=PP_ALIGN.CENTER)
+
+# Axes de communication
+rect(sl,0.4,5.45,12.53,1.85,WHITE)
+rect(sl,0.4,5.45,0.12,1.85,COBALT)
+tb(sl,"Axes de communication",0.65,5.52,12,0.42,size=16,bold=True,color=INK)
+axes = [
+    ("🎯 Fonctionnel","Correction orthographique\nen temps réel sur papier",COBALT),
+    ("❤️ Émotionnel","Confiance en soi\nRéussite scolaire et pro",RGBColor(0xC0,0x3A,0x2B)),
+    ("🏅 Symbolique","Produit made in France\nDiscrèt et innovant",RGBColor(0x7B,0x3F,0x9E)),
+    ("📱 Digital","Aucun concurrent\nsur papier — USP unique",RGBColor(0x0E,0x6B,0x5E)),
+]
+for i,(title,text,col) in enumerate(axes):
+    x=0.55+i*3.1
+    rect(sl,x,5.98,2.95,1.22,col)
+    tb(sl,title,x+0.1,6.05,2.75,0.42,size=13,bold=True,color=GOLD)
+    tb(sl,text,x+0.1,6.48,2.75,0.65,size=13,color=WHITE)
+
+# ─────────────────────────────────────────────────────────────────────────────
+# DIAPO 16 — BÉNÉFICE CONSOMMATEUR
+# ─────────────────────────────────────────────────────────────────────────────
+sl = prs.slides.add_slide(BLANK)
+rect(sl,0,0,13.33,7.5,INK)
+section_tag(sl,"MARKETING")
+
+tb(sl,"Bénéfice\nConsommateur",0.5,0.35,10,1.5,size=42,bold=True,color=WHITE)
+rect(sl,0.5,1.85,12.33,0.08,GOLD)
 
 benefits = [
-    ("Bénéfice fonctionnel\n(USP — utilité)",
-     "Ce que le produit fait concrètement",
-     "Corriger les fautes d'orthographe en temps réel sur papier, sans connexion, "
-     "en situation de manuscrit (école, bureau, examen)."),
-    ("Bénéfice émotionnel\n(ressenti)",
-     "Ce que l'utilisateur ressent",
+    ("🔧","Bénéfice\nFonctionnel","Ce que le produit fait",
+     "Corriger les fautes d'orthographe en temps réel sur papier, "
+     "sans connexion, en situation de manuscrit (école, bureau, examen).",
+     COBALT),
+    ("❤️","Bénéfice\nÉmotionnel","Ce que l'utilisateur ressent",
      "Confiance en soi, réduction de la honte liée aux fautes, "
-     "sérénité lors des examens et prises de notes importantes."),
-    ("Bénéfice symbolique\n(image et statut)",
-     "Ce que le produit dit de soi",
-     "Utiliser un produit made in France innovant. Montrer qu'on valorise "
-     "l'écrit soigné tout en adoptant les nouvelles technologies de manière discrète."),
+     "sérénité lors des examens et prises de notes importantes.",
+     RGBColor(0xC0,0x3A,0x2B)),
+    ("🏆","Bénéfice\nSymbolique","Ce que le produit dit de soi",
+     "Utiliser un produit made in France innovant. "
+     "Montrer qu'on valorise l'écrit soigné tout en adoptant les nouvelles technologies.",
+     RGBColor(0x7B,0x3F,0x9E)),
 ]
-y = 1.6
-for typ, defn, appli in benefits:
-    add_rect(sl, 0.4, y, 12.53, 1.45, WHITE if benefits.index((typ,defn,appli))%2==0 else GRAY_LIGHT)
-    add_rect(sl, 0.4, y, 3.5, 1.45, DARK_BLUE)
-    add_textbox(sl, typ, 0.55, y+0.2, 3.2, 1.0, font_size=15, bold=True, color=WHITE)
-    add_textbox(sl, defn, 4.0, y+0.08, 3.0, 0.42, font_size=13, italic=True, color=MID_BLUE)
-    add_textbox(sl, appli, 4.0, y+0.52, 8.7, 0.85, font_size=15, color=TEXT_DARK)
-    y += 1.55
+for i,(icon,title,subtitle,text,bg) in enumerate(benefits):
+    x=0.4+i*4.3
+    rect(sl,x,2.1,4.1,3.55,bg)
+    tb(sl,icon,x,2.2,4.1,0.75,size=32,align=PP_ALIGN.CENTER,color=WHITE)
+    tb(sl,title,x+0.15,2.97,3.8,0.7,size=18,bold=True,color=GOLD,align=PP_ALIGN.CENTER)
+    tb(sl,subtitle,x+0.15,3.65,3.8,0.38,size=12,color=RGBColor(0xC8,0xD8,0xE8),
+       italic=True,align=PP_ALIGN.CENTER)
+    rect(sl,x+0.35,4.02,3.4,0.05,WHITE)
+    tb(sl,text,x+0.2,4.15,3.7,1.38,size=13,color=WHITE,wrap=True)
 
-add_rect(sl, 0.4, y, 12.53, 1.0, ORANGE)
-add_textbox(sl, "Bénéfice consommateur synthétique :", 0.6, y+0.08, 12, 0.38, font_size=15, bold=True, color=WHITE)
-add_textbox(sl,
-    "« Avec le Stylo Ortho, j'écris à la main sans stresser pour mes fautes — "
-    "en cours, au bureau ou en examen, c'est le seul outil qui fait ça sur papier. »",
-    0.6, y+0.48, 12, 0.42, font_size=16, bold=True, color=WHITE)
+# Synthèse dorée
+rect(sl,0.4,5.85,12.53,1.45,GOLD)
+tb(sl,"Bénéfice synthétique :",0.7,5.95,12,0.42,size=15,bold=True,color=INK)
+tb(sl,"« Avec le Stylo Ortho, j'écris à la main sans stresser pour mes fautes — "
+   "en cours, au bureau ou en examen, c'est le seul outil qui fait ça sur papier. »",
+   0.7,6.38,11.9,0.82,size=18,bold=True,color=INK,align=PP_ALIGN.CENTER)
 
 # ─────────────────────────────────────────────────────────────────────────────
-# DIAPO 17 — Marketing Mix : Produit
+# DIAPO 17 — MARKETING MIX : PRODUIT
 # ─────────────────────────────────────────────────────────────────────────────
 sl = prs.slides.add_slide(BLANK)
-slide_header(sl, "P1 — Produit", section_label="MARKETING MIX")
+dark_header(sl,"P1 — Produit",
+            subtitle="Le Stylo Ortho : un stylo intelligent qui aide à écrire sans fautes",
+            tag="MARKETING MIX")
 
-add_textbox(sl,
-    "Le Stylo Ortho est un stylo intelligent qui aide à écrire sans fautes. "
-    "Il ressemble à un stylo classique, mais il contient une petite technologie intégrée.",
-    0.5, 1.55, 12.33, 0.65, font_size=17, italic=True, color=MID_BLUE)
+# Visuel central + caractéristiques en orbite
+rect(sl,4.8,1.72,3.75,3.1,COBALT)
+tb(sl,"✏️",4.8,1.82,3.75,1.5,size=62,align=PP_ALIGN.CENTER,color=WHITE)
+tb(sl,"Stylo Ortho\nStandard",4.8,3.3,3.75,0.85,size=18,bold=True,color=GOLD,align=PP_ALIGN.CENTER)
+tb(sl,"Assemblé en France 🇫🇷",4.8,4.1,3.75,0.5,size=13,color=WHITE,italic=True,align=PP_ALIGN.CENTER)
 
-# Tableau caractéristiques
-y = 2.3
-add_rect(sl, 0.4, y, 12.53, 0.4, DARK_BLUE)
-for x, w, lbl in [(0.42,2.5,"Caractéristique"),(2.95,3.3,"Description"),(6.28,6.6,"Avantage consommateur (USP)")]:
-    add_textbox(sl, lbl, x, y+0.04, w, 0.33, font_size=13, bold=True, color=WHITE)
+# Gauche
+for j,(feat,desc) in enumerate([
+    ("⚡ Recharge USB-C","15 minutes de charge"),
+    ("🔄 Encre rechargeable","Économique et moderne"),
+    ("✏️ Gomme effaçable","Usage fluide, sans correcteur"),
+]):
+    y2=1.82+j*1.02
+    rect(sl,0.4,y2,4.1,0.88,RGBColor(0x1E,0x3A,0x6E))
+    tb(sl,feat,0.55,y2+0.08,3.8,0.38,size=14,bold=True,color=GOLD)
+    tb(sl,desc,0.55,y2+0.48,3.8,0.32,size=13,color=WHITE)
 
-chars2 = [
-    ("Recharge USB-C", "15 minutes de charge", "Pratique pour les élèves et professionnels du quotidien"),
-    ("Encre rechargeable", "Encre moderne rechargeable, économique sur le long terme", "Plus pratique et économique que les stylos à jeter"),
-    ("Gomme effaçable", "Petite gomme au bout du stylo pour effacer et réécrire directement", "Pas besoin de correcteur blanc, usage fluide"),
-    ("Écran intégré", "Affiche les corrections en rouge et propose la bonne orthographe", "Correction immédiate en temps réel — USP unique sur le marché"),
-    ("Design ergonomique", "Léger, conçu pour une utilisation longue sans fatigue", "Adapté à tous : élèves dès le collège, étudiants, professionnels"),
-    ("4 couleurs disponibles", "Noir, Bleu, Rouge, Vert", "Personnalisation selon les préférences"),
+# Droite
+for j,(feat,desc) in enumerate([
+    ("📺 Écran intégré","Correction en rouge en temps réel"),
+    ("🎨 4 couleurs","Noir · Bleu · Rouge · Vert"),
+    ("🏃 Design ergonomique","Léger, toutes durées d'utilisation"),
+]):
+    y2=1.82+j*1.02
+    rect(sl,8.85,y2,4.1,0.88,RGBColor(0x1E,0x3A,0x6E))
+    tb(sl,feat,9.0,y2+0.08,3.8,0.38,size=14,bold=True,color=GOLD)
+    tb(sl,desc,9.0,y2+0.48,3.8,0.32,size=13,color=WHITE)
+
+rect(sl,0.4,5.05,12.53,0.65,PALE_MINT)
+rect(sl,0.4,5.05,0.12,0.65,MINT)
+tb(sl,"86,4 % des répondants jugent le Stylo Ortho utile ou très utile (enquête n=214) — "
+   "le produit répond à un besoin réel et quotidien.",
+   0.65,5.12,12,0.52,size=14,bold=True,color=INK)
+
+# ─────────────────────────────────────────────────────────────────────────────
+# DIAPO 18 — MARKETING MIX : PRIX
+# ─────────────────────────────────────────────────────────────────────────────
+sl = prs.slides.add_slide(BLANK)
+dark_header(sl,"P2 — Prix",subtitle="Stratégie de prix et justification de la valeur",tag="MARKETING MIX")
+
+# 2 grands prix visuels
+rect(sl,0.5,1.72,5.8,3.3,COBALT)
+rect(sl,6.6,1.72,5.83,3.3,RGBColor(0x0E,0x6B,0x5E))
+tb(sl,"99,90 €",0.5,1.88,5.8,1.4,size=56,bold=True,color=GOLD,align=PP_ALIGN.CENTER)
+tb(sl,"Prix de vente public",0.5,3.2,5.8,0.48,size=17,color=WHITE,align=PP_ALIGN.CENTER)
+tb(sl,"Standard · tous publics",0.5,3.65,5.8,0.38,size=14,color=SKY,italic=True,align=PP_ALIGN.CENTER)
+tb(sl,"44,90 €",6.6,1.88,5.83,1.4,size=56,bold=True,color=GOLD,align=PP_ALIGN.CENTER)
+tb(sl,"Prix promotionnel rentrée",6.6,3.2,5.83,0.48,size=17,color=WHITE,align=PP_ALIGN.CENTER)
+tb(sl,"Déclencheur des premiers achats",6.6,3.65,5.83,0.38,size=14,color=RGBColor(0x90,0xE8,0xD0),
+   italic=True,align=PP_ALIGN.CENTER)
+
+# Justifications
+rect(sl,0.5,5.15,12.43,2.12,LIGHT_BG)
+rect(sl,0.5,5.15,0.12,2.12,COBALT)
+tb(sl,"Pourquoi 99,90 € ?",0.75,5.22,12,0.42,size=16,bold=True,color=INK)
+points = [
+    "✅ 82,3 % des répondants sont intéressés ou potentiellement intéressés — le prix est accepté",
+    "✅ USP unique sur le marché papier → valeur fonctionnelle qui justifie le prix premium",
+    "✅ Comparable à une calculatrice scolaire (30–80 €) ou une montre connectée d'entrée de gamme",
+    "✅ Prix psychologique 44,90 € utilisé à la rentrée pour déclencher les premiers achats",
 ]
-for i, (c, d, a) in enumerate(chars2):
-    y += 0.55
-    bg = WHITE if i%2==0 else GRAY_LIGHT
-    add_rect(sl, 0.4, y, 12.53, 0.53, bg)
-    add_textbox(sl, c, 0.42, y+0.06, 2.5, 0.43, font_size=13, bold=True, color=DARK_BLUE)
-    add_textbox(sl, d, 2.95, y+0.06, 3.3, 0.43, font_size=12, color=TEXT_DARK)
-    add_textbox(sl, a, 6.28, y+0.06, 6.5, 0.43, font_size=12, color=TEXT_DARK)
-
-# Partenaires
-add_rect(sl, 0.4, y+0.6, 12.53, 0.72, LIGHT_BLUE)
-add_textbox(sl, "Partenaires industriels : Shenzhen Apec (électronique 🇨🇳)  •  Pentel / Aihao (encre 🇯🇵🇨🇳)  •  Nicomatic assemblage final 🇫🇷",
-            0.6, y+0.65, 12, 0.6, font_size=14, color=DARK_BLUE)
+for j,pt in enumerate(points):
+    tb(sl,pt,0.75,5.7+j*0.36,11.8,0.34,size=13,color=SLATE)
 
 # ─────────────────────────────────────────────────────────────────────────────
-# DIAPO 18 — Marketing Mix : Prix
+# DIAPO 19 — MARKETING MIX : DISTRIBUTION
 # ─────────────────────────────────────────────────────────────────────────────
 sl = prs.slides.add_slide(BLANK)
-slide_header(sl, "P2 — Prix", section_label="MARKETING MIX")
+dark_header(sl,"P3 — Distribution",
+            subtitle="Une stratégie en 3 phases : sélective → directe → intensive",
+            tag="MARKETING MIX")
 
-# KPI prix
-add_kpi(sl, "99,90 €", "Prix de vente public\n(Standard)", 0.5, 1.6, 3.9, 1.6)
-add_kpi(sl, "44,90 €", "Prix psychologique\n(promotionnel rentrée)", 4.7, 1.6, 3.9, 1.6)
-add_kpi(sl, "82,3 %", "des répondants\nintéressés (enquête)", 8.9, 1.6, 3.9, 1.6)
+# Timeline horizontale
+rect(sl,0.4,1.72,12.53,0.72,COBALT)
+phases = [("Phase 1 — Lancement",0.5,4.3),("Phase 2 — Croissance",4.85,4.3),("Phase 3 — Maturité",9.2,3.7)]
+for label,x,w in phases:
+    tb(sl,label,x,1.8,w,0.55,size=15,bold=True,color=WHITE,align=PP_ALIGN.CENTER)
 
-add_bullet_box(sl,
-    ["Version unique : Stylo Ortho Standard à 99,90 € — cible principale : élèves dès le collège, étudiants, parents",
-     "82,3 % des répondants sont intéressés ou potentiellement intéressés (enquête n=214)",
-     "Le prix de vente de 99,90 € est justifié par la valeur fonctionnelle unique (USP) : "
-     "aucun concurrent sur papier",
-     "Le prix psychologique de 44,90 € sera utilisé comme prix promotionnel à la rentrée "
-     "pour déclencher les premiers achats (offre de lancement)"],
-    0.4, 3.5, 12.53, 3.55,
-    title="Stratégie de prix", bg=WHITE, font_size=16, title_size=19)
-
-# ─────────────────────────────────────────────────────────────────────────────
-# DIAPO 19 — Marketing Mix : Distribution
-# ─────────────────────────────────────────────────────────────────────────────
-sl = prs.slides.add_slide(BLANK)
-slide_header(sl, "P3 — Distribution", section_label="MARKETING MIX")
-
-dist_data = [
-    ("✅ Priorité 1",
-     "Magasins spécialisés (circuit court)",
-     "Bureau Vallée, Fnac, Cultura, librairies scolaires",
-     "Le vendeur peut présenter et expliquer le produit en rayon. "
-     "Essentiel pour un produit innovant nécessitant une démonstration."),
-    ("✅ Priorité 2",
-     "Vente en ligne (circuit ultra-court)",
-     "Site e-commerce propre + Amazon + Fnac.com",
-     "Indispensable pour toucher les parents qui achètent des fournitures scolaires en ligne. "
-     "Marge maîtrisée. 49 % des transactions papeterie passent par l'e-commerce."),
-    ("⏳ Phase 2",
-     "Grandes surfaces (circuit long)",
-     "Carrefour, E.Leclerc",
-     "En phase 2 uniquement, une fois la notoriété du produit établie. "
-     "Recul de –7 % en 2024 — approche prudente justifiée."),
-    ("🤝 B2B",
-     "Établissements scolaires / Circuit direct",
-     "Lycées, collèges, centres de formation",
-     "Partenariat Ministère Éducation nationale (phase de test). "
-     "Objectif : 500+ stylos vendus en Année 1, 2 000+ en Année 2."),
+distrib2 = [
+    ("🏪","Magasins spécialisés","Bureau Vallée · Fnac\nCultura · Librairies",
+     "Démonstration produit\nen rayon — essentiel pour\nun produit innovant",
+     "PDM ≈ 15–20 %\n+3 % / an",COBALT,0.5,4.05),
+    ("🛒","E-commerce","stylo-ortho.fr\nAmazon · Fnac.com",
+     "49 % des transactions\npapeterie en ligne\nMarge maîtrisée",
+     "PDM ≈ 49 %\n+15 % / an",RGBColor(0x0E,0x6B,0x5E),4.85,4.05),
+    ("🏬","Grandes surfaces\nB2B",
+     "Carrefour · E.Leclerc\nLycées · Collèges",
+     "Phase 2 après notoriété\nPartenariat Ministère\nÉducation Nationale",
+     "332 M€ rentrée\nFort potentiel B2B",SLATE,9.2,3.55),
 ]
-y = 1.6
-for badge, canal, points, why in dist_data:
-    h = 1.18
-    add_rect(sl, 0.4, y, 12.53, h, WHITE if dist_data.index((badge,canal,points,why))%2==0 else GRAY_LIGHT)
-    add_rect(sl, 0.4, y, 1.8, h, DARK_BLUE)
-    add_textbox(sl, badge, 0.5, y+0.35, 1.6, 0.48, font_size=14, bold=True, color=ORANGE, align=PP_ALIGN.CENTER)
-    add_textbox(sl, canal, 2.3, y+0.08, 4.0, 0.42, font_size=15, bold=True, color=DARK_BLUE)
-    add_textbox(sl, points, 2.3, y+0.52, 4.0, 0.55, font_size=13, color=MID_BLUE, italic=True)
-    add_textbox(sl, why, 6.4, y+0.1, 6.4, 0.95, font_size=13, color=TEXT_DARK)
-    y += h + 0.07
+for icon,title,pts,why,stats,bg,x,w in distrib2:
+    rect(sl,x,2.58,w,4.62,bg)
+    tb(sl,icon,x,2.65,w,0.82,size=34,align=PP_ALIGN.CENTER,color=WHITE)
+    tb(sl,title,x+0.15,3.5,w-0.3,0.7,size=16,bold=True,color=GOLD,align=PP_ALIGN.CENTER)
+    rect(sl,x+0.3,4.22,w-0.6,0.05,WHITE)
+    tb(sl,pts,x+0.2,4.35,w-0.4,0.85,size=13,color=WHITE,align=PP_ALIGN.CENTER)
+    rect(sl,x+0.3,5.22,w-0.6,0.05,RGBColor(0xFF,0xFF,0xFF))
+    tb(sl,why,x+0.2,5.35,w-0.4,0.95,size=12,color=RGBColor(0xC8,0xD8,0xE8),italic=True)
+    rect(sl,x+0.15,6.38,w-0.3,0.65,RGBColor(0,0,0))
+    tb(sl,stats,x+0.15,6.44,w-0.3,0.55,size=12,bold=True,color=GOLD,align=PP_ALIGN.CENTER)
 
 # ─────────────────────────────────────────────────────────────────────────────
-# DIAPO 20 — Conclusion / Slogan
+# DIAPO 20 — CONCLUSION & SLOGAN
 # ─────────────────────────────────────────────────────────────────────────────
 sl = prs.slides.add_slide(BLANK)
-add_rect(sl, 0, 0, 13.33, 7.5, DARK_BLUE)
-add_rect(sl, 0, 4.8, 13.33, 2.7, MID_BLUE)
+rect(sl,0,0,13.33,7.5,INK)
+rect(sl,0,5.6,13.33,1.9,COBALT)
+# Décoration
+rect(sl,0,3.45,13.33,0.08,GOLD)
 
-add_textbox(sl, "CONCLUSION", 1, 0.5, 11.33, 0.7,
-            font_size=22, bold=True, color=ORANGE, align=PP_ALIGN.CENTER)
+tb(sl,"CONCLUSION",0.5,0.35,12.33,0.65,size=22,bold=True,color=GOLD,align=PP_ALIGN.CENTER)
 
-add_textbox(sl,
-    "Le Stylo Ortho est le premier stylo correcteur d'orthographe en temps réel sur papier. "
-    "Il répond à un besoin réel, validé par 214 répondants, sur un marché pionnier.",
-    1, 1.25, 11.33, 1.0, font_size=19, color=LIGHT_BLUE, align=PP_ALIGN.CENTER)
+tb(sl,"Le Stylo Ortho est le premier stylo correcteur d'orthographe "
+   "en temps réel sur papier.\nIl répond à un besoin réel, validé par 214 répondants, "
+   "sur un marché encore vierge.",
+   0.5,1.05,12.33,1.2,size=19,color=WHITE,align=PP_ALIGN.CENTER)
 
-add_rect(sl, 2.5, 2.45, 8.33, 0.06, ORANGE)
+# 3 chiffres clés
+for val,lbl,x in [("82,3 %","intéressés ou\npotentiellement",0.5),
+                   ("86,4 %","jugent le produit\nutile",4.8),
+                   ("99,90 €","prix de lancement\npublic",9.1)]:
+    tb(sl,val,x,2.38,3.6,0.88,size=38,bold=True,color=GOLD,align=PP_ALIGN.CENTER)
+    tb(sl,lbl,x,3.18,3.6,0.55,size=15,color=SKY,align=PP_ALIGN.CENTER)
 
-add_textbox(sl, "Notre slogan :", 1, 2.65, 11.33, 0.5,
-            font_size=18, color=RGBColor(0xB0,0xD0,0xE8), align=PP_ALIGN.CENTER)
-add_textbox(sl,
-    "« Écrire juste, à la main. »",
-    1, 3.15, 11.33, 1.1,
-    font_size=44, bold=True, color=WHITE, align=PP_ALIGN.CENTER)
+# Slogan central
+rect(sl,0.5,3.62,12.33,1.75,GOLD)
+tb(sl,"Notre slogan :",0.7,3.72,12,0.42,size=16,color=INK)
+tb(sl,"« Écrire juste, à la main. »",0.5,4.05,12.33,1.15,
+   size=44,bold=True,color=INK,align=PP_ALIGN.CENTER)
 
-add_textbox(sl, "Stylo Ortho  •  Assemblé en France  •  stylo-ortho.fr",
-            1, 5.2, 11.33, 0.6,
-            font_size=18, color=WHITE, align=PP_ALIGN.CENTER)
-add_textbox(sl,
-    "82,3 % intéressés  •  86,4 % trouvent le produit utile  •  99,90 € prix de lancement",
-    1, 5.9, 11.33, 0.5,
-    font_size=14, color=LIGHT_BLUE, align=PP_ALIGN.CENTER)
-add_textbox(sl, "Mathéo Guzzi  •  Pierre Lachat  •  Valentin Imbault-Casset",
-            1, 6.55, 11.33, 0.5,
-            font_size=13, color=RGBColor(0x80,0xA0,0xC0), align=PP_ALIGN.CENTER)
+# Pied de page
+tb(sl,"Stylo Ortho  ·  Assemblé en France  ·  stylo-ortho.fr",
+   0.5,5.72,12.33,0.48,size=18,color=WHITE,align=PP_ALIGN.CENTER)
+tb(sl,"Mathéo Guzzi  ·  Pierre Lachat  ·  Valentin Imbault-Casset",
+   0.5,6.28,12.33,0.42,size=14,color=SKY,align=PP_ALIGN.CENTER)
+tb(sl,"Merci de votre attention",0.5,6.75,12.33,0.42,
+   size=14,color=RGBColor(0x60,0x88,0xB8),italic=True,align=PP_ALIGN.CENTER)
 
 # ─────────────────────────────────────────────────────────────────────────────
-output_path = "/home/user/Stylo/Analyse_du_marche_StyloOrtho.pptx"
-prs.save(output_path)
-print(f"Saved: {output_path}")
-print(f"Slides: {len(prs.slides)}")
+output = "/home/user/Stylo/Analyse_du_marche_StyloOrtho.pptx"
+prs.save(output)
+print(f"✅ Saved: {output}  ({len(prs.slides)} slides)")
